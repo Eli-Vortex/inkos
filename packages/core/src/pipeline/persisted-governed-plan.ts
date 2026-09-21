@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { escapeRegExp } from "../utils/escape-regexp.js";
 import { join, relative } from "node:path";
 import type { PlanChapterOutput } from "../agents/planner.js";
 import {
@@ -266,9 +267,6 @@ function isMeaningfulLegacyValue(value: string): boolean {
   return true;
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 export function relativeToBookDir(bookDir: string, absolutePath: string): string {
   return relative(bookDir, absolutePath).replaceAll("\\", "/");

@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import type { TFunction } from "../hooks/use-i18n";
 import { fetchJson, useApi } from "../hooks/use-api";
+import { LoadingState } from "./ui/states";
 
 interface ChapterVersion {
   readonly id: string;
@@ -166,10 +167,7 @@ export function ChapterWorkspacePanel({
       </header>
 
       {loading && !data ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <RefreshCw size={15} className="animate-spin" />
-          {t("common.loading")}
-        </div>
+        <LoadingState label={t("common.loading")} rows={3} />
       ) : (
         <>
           <label className="block space-y-2">
@@ -206,7 +204,7 @@ export function ChapterWorkspacePanel({
               type="button"
               onClick={() => void drawInspiration()}
               disabled={busy !== null}
-              className="inline-flex items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-2 text-xs font-bold text-amber-700 transition hover:bg-amber-500/15 dark:text-amber-300 disabled:opacity-50"
+              className="inline-flex items-center gap-2 rounded-xl border border-warning/35 bg-warning-soft px-4 py-2 text-xs font-bold text-warning transition hover:bg-warning-soft dark:text-warning disabled:opacity-50"
             >
               <Lightbulb size={14} />
               {busy === "inspiration" ? t("reader.drawing") : t("reader.inspiration")}
@@ -221,18 +219,18 @@ export function ChapterWorkspacePanel({
         </div>
       )}
       {notice && (
-        <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-300">
+        <div className="rounded-xl border border-success/30 bg-success-soft px-4 py-3 text-sm text-success dark:text-success">
           {notice}
         </div>
       )}
 
       {inspiration && (
-        <article className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
+        <article className="rounded-xl border border-warning/35 bg-warning-soft p-4">
           <div className="whitespace-pre-wrap text-sm leading-6 text-foreground">{inspiration}</div>
           <button
             type="button"
             onClick={addInspirationToBrief}
-            className="mt-3 inline-flex items-center gap-2 text-xs font-bold text-amber-700 hover:text-amber-600 dark:text-amber-300"
+            className="mt-3 inline-flex items-center gap-2 text-xs font-bold text-warning hover:text-warning dark:text-warning"
           >
             <Lightbulb size={13} />
             {t("reader.addToBrief")}

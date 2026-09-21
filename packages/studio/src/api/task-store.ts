@@ -1,4 +1,4 @@
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RequestedIntent } from "@actalk/inkos-core";
 
@@ -92,6 +92,35 @@ export async function saveStudioTaskSnapshot(
   }
 }
 
+/**
+ * Every session that currently has a task snapshot.
+ *
+ * Listing the task directory first turns "count each book's pending tasks" from
+ * one file read per session in the project into one read per actual task. Only
+ * sessions that have run a task have a file here, and that set is normally tiny.
+ */
+export async function listStudioTaskSessionIds(projectRoot: string): Promise<string[]> {
+  try {
+    const files = await readdir(join(projectRoot, TASKS_DIR));
+    const sessionIds: string[] = [];
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      // Per-file guard: one malformed name (a stray `%` makes decodeURIComponent
+      // throw) must not turn the whole directory into "no tasks", which used to
+      // hide every book's pending tasks at once.
+      try {
+        const sessionId = decodeURIComponent(file.slice(0, -".json".length));
+        if (sessionId.length > 0) sessionIds.push(sessionId);
+      } catch {
+        // Skip the malformed name; other tasks still list.
+      }
+    }
+    return sessionIds;
+  } catch {
+    return [];
+  }
+}
+
 export async function loadStudioTaskSnapshot(
   projectRoot: string,
   sessionId: string,
@@ -110,3 +139,4 @@ export async function deleteStudioTaskSnapshot(projectRoot: string, sessionId: s
   await writeQueues.get(path)?.catch(() => undefined);
   await unlink(path).catch(() => undefined);
 }
+

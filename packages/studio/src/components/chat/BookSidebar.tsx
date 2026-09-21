@@ -175,7 +175,7 @@ function ArtifactView({ bookId }: { readonly bookId: string }) {
             <button
               onClick={handleSave}
               disabled={saving}
-              className="w-6 h-6 rounded-md flex items-center justify-center text-emerald-500 hover:bg-emerald-500/10 transition-colors"
+              className="w-6 h-6 rounded-md flex items-center justify-center text-success hover:bg-success-soft transition-colors"
             >
               {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
             </button>

@@ -22,6 +22,7 @@
  */
 
 import type { StoredHook } from "../state/memory-db.js";
+import { escapeRegExp as escapeRegex } from "./escape-regexp.js";
 
 export interface VolumeBoundary {
   readonly name: string;
@@ -194,13 +195,9 @@ export function resolveHalfLifeChapters(hook: StoredHook): number {
 // Shared advanced_count promotion pass (used by both consolidator and runner)
 // ---------------------------------------------------------------------------
 
-/**
- * Escape special regex characters in a string so it can be used as a
- * literal pattern inside `new RegExp(...)`.
- */
-export function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+// Re-exported for callers that import this helper from here; the implementation
+// lives with the other regex escaping so it stays single-sourced.
+export { escapeRegExp as escapeRegex } from "./escape-regexp.js";
 
 export interface PromotionPassResult {
   /** Whether any hook flipped to promoted=true. */

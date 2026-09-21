@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseHash, routeToHash } from "./use-hash-route";
+import { WORKBENCH_AREAS } from "../workbench/areas";
 
 describe("hash route", () => {
   describe("parseHash", () => {
@@ -117,9 +118,24 @@ describe("hash route", () => {
       expect(decodeURIComponent(hash)).toContain("自定义");
     });
 
-    it("non-hash pages return empty string", () => {
-      expect(routeToHash({ page: "daemon" })).toBe("");
-      expect(routeToHash({ page: "logs" })).toBe("");
+    it("round-trips auxiliary pages so a refresh keeps the author in place", () => {
+      for (const page of ["doctor", "genres", "style", "radar", "daemon", "logs"] as const) {
+        const hash = routeToHash({ page } as never);
+        expect(hash).toBe(`#/${page}`);
+        expect(parseHash(hash)).toEqual({ page });
+      }
+    });
+
+    it("round-trips book-scoped pages", () => {
+      const chapterHash = routeToHash({ page: "chapter", bookId: "novel-1", chapterNumber: 12 });
+      expect(chapterHash).toBe("#/book/novel-1/chapter/12");
+      expect(parseHash(chapterHash)).toEqual({ page: "chapter", bookId: "novel-1", chapterNumber: 12 });
+
+      const analyticsHash = routeToHash({ page: "analytics", bookId: "novel-1" });
+      expect(parseHash(analyticsHash)).toEqual({ page: "analytics", bookId: "novel-1" });
+
+      const truthHash = routeToHash({ page: "truth", bookId: "novel-1" });
+      expect(parseHash(truthHash)).toEqual({ page: "truth", bookId: "novel-1" });
     });
   });
 });
@@ -133,5 +149,55 @@ describe("play route", () => {
   });
   it("decodes url-encoded ids", () => {
     expect(parseHash("#/play/a%20b")).toEqual({ page: "play", projectId: "a b" });
+  });
+});
+
+describe("workbench route", () => {
+  it("parses #/workbench as the workbench with no area chosen yet", () => {
+    expect(parseHash("#/workbench")).toEqual({ page: "workbench" });
+  });
+
+  it("parses every declared area", () => {
+    for (const area of WORKBENCH_AREAS) {
+      expect(parseHash(`#/workbench/${area}`)).toEqual({ page: "workbench", area });
+    }
+  });
+
+  it("keeps the route and drops only an unknown area", () => {
+    expect(parseHash("#/workbench/chapter")).toEqual({ page: "workbench" });
+  });
+
+  it("carries the book context so a deep link can select it", () => {
+    expect(parseHash("#/workbench/outline/九龙城夜行")).toEqual({
+      page: "workbench",
+      area: "outline",
+      bookId: "九龙城夜行",
+    });
+  });
+
+  it("decodes an encoded book id", () => {
+    expect(parseHash("#/workbench/compare/%E4%B9%9D%E9%BE%99")).toEqual({
+      page: "workbench",
+      area: "compare",
+      bookId: "九龙",
+    });
+  });
+
+  it("does not shadow an existing route", () => {
+    expect(parseHash("#/chat")).toEqual({ page: "chat" });
+    expect(parseHash("#/book/alpha")).toEqual({ page: "book", bookId: "alpha" });
+    expect(parseHash("#/services/openai")).toEqual({ page: "service-detail", serviceId: "openai" });
+  });
+
+  it("round-trips area and book context", () => {
+    expect(routeToHash({ page: "workbench" })).toBe("#/workbench");
+    expect(routeToHash({ page: "workbench", area: "books" })).toBe("#/workbench/books");
+    expect(routeToHash({ page: "workbench", area: "compare", bookId: "b-1" })).toBe("#/workbench/compare/b-1");
+  });
+
+  it("never emits a book context without an area, so the book survives a reload", () => {
+    const hash = routeToHash({ page: "workbench", bookId: "b-1" });
+    expect(hash).toBe("#/workbench/writing/b-1");
+    expect(parseHash(hash)).toEqual({ page: "workbench", area: "writing", bookId: "b-1" });
   });
 });

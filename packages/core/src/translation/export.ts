@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { EPub } from "epub-gen-memory";
+import { escapeHtml } from "../utils/escape-html.js";
 import { loadTranslationChapter, loadTranslationManifest, translationProjectDir } from "./run-store.js";
 import type { TranslationExportFormat, TranslationExportResult } from "./types.js";
 
@@ -64,13 +65,6 @@ async function renderTextExport(
     }
   }
   return lines.join("\n").trimEnd() + "\n";
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
 }
 
 function safeFilename(value: string): string {

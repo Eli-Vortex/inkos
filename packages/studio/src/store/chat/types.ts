@@ -68,6 +68,7 @@ export interface SessionSummary {
   readonly bookId: string | null;
   readonly sessionKind?: ChatSessionKind;
   readonly playMode?: PlayMode;
+  readonly genre?: string;
   readonly title: string | null;
   readonly messageCount: number;
   readonly createdAt: number;
@@ -141,6 +142,11 @@ export interface SendMessageOptions {
   readonly disabledSkills?: ReadonlyArray<string>;
   readonly attachments?: ReadonlyArray<ChatAttachmentPayload>;
   readonly playMode?: PlayMode;
+  /**
+   * Retry path only: the original failed send already appended the user bubble,
+   * so re-appending on replay would duplicate it.
+   */
+  readonly skipUserMessage?: boolean;
 }
 
 // 一次失败的聊天轮发送的原样参数（sendMessage 的 text 与 options），
@@ -163,6 +169,7 @@ export interface SessionRuntime {
   readonly bookId: string | null;
   readonly sessionKind?: ChatSessionKind;
   readonly playMode?: PlayMode;
+  readonly genre?: string;
   readonly title: string | null;
   readonly messages: ReadonlyArray<Message>;
   readonly stream: EventSource | null;
@@ -216,8 +223,8 @@ export interface MessageActions {
   addErrorMessage: (sessionId: string, errorMsg: string) => void;
   loadSessionMessages: (sessionId: string, msgs: ReadonlyArray<SessionMessage>) => void;
   loadSessionList: (bookId: string | null) => Promise<ReadonlyArray<SessionSummary>>;
-  createSession: (bookId: string | null, sessionKind?: ChatSessionKind, playMode?: PlayMode) => Promise<string>;
-  createDraftSession: (bookId: string | null, sessionKind?: ChatSessionKind, playMode?: PlayMode) => string;
+  createSession: (bookId: string | null, sessionKind?: ChatSessionKind, playMode?: PlayMode, genre?: string) => Promise<string>;
+  createDraftSession: (bookId: string | null, sessionKind?: ChatSessionKind, playMode?: PlayMode, genre?: string) => string;
   setSessionPlayMode: (sessionId: string, playMode: PlayMode) => void;
   renameSession: (sessionId: string, title: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
@@ -228,6 +235,11 @@ export interface MessageActions {
   // User stop aborts the complete workflow; navigation uses chat scope so a
   // background production task can keep running after its Pi turn is cancelled.
   abortSession: (sessionId: string, scope?: "all" | "chat") => Promise<void>;
+  /**
+   * Roll the session back by `turns` request turns (default 1), then reload it.
+   * Used when the author is unsatisfied with a reply and wants to retry.
+   */
+  rewindSession: (sessionId: string, turns?: number) => Promise<void>;
   setSelectedModel: (model: string, service: string) => void;
 }
 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { escapeRegExp } from "../utils/escape-regexp.js";
 import yaml from "js-yaml";
 
 const ProtagonistSchema = z.object({
@@ -308,6 +309,3 @@ function normalizeHeading(value: string): string {
   return value.replace(/[：:]\s*$/, "").trim().toLowerCase();
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}

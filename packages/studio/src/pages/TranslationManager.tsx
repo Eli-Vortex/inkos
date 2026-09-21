@@ -4,6 +4,7 @@ import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
 import { fetchJson, useApi } from "../hooks/use-api";
 import { Download, FileText, Languages, Loader2, Play, Upload } from "lucide-react";
+import { EmptyState, ErrorState, LoadingState } from "../components/ui/states";
 
 interface Nav { toDashboard: () => void }
 
@@ -365,12 +366,14 @@ export function TranslationManager({ nav, theme, t }: { nav: Nav; theme: Theme; 
             <button onClick={() => refetch()} className={`rounded-lg px-3 py-1.5 text-xs ${c.btnSecondary}`}>{t("translation.refresh")}</button>
           </div>
 
-          {loading && <div className="text-sm text-muted-foreground">{t("common.loading")}</div>}
-          {error && <div className="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">{error}</div>}
+          {loading && <LoadingState label={t("common.loading")} rows={3} />}
+          {error && <ErrorState title={t("common.error")} message={error} />}
           {!loading && translations.length === 0 && (
-            <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
-              {t("translation.empty")}
-            </div>
+            <EmptyState
+              icon={<Languages size={20} aria-hidden="true" />}
+              title={t("translation.empty")}
+              className="py-10"
+            />
           )}
           {translations.length > 0 && (
             <div className="grid gap-3 md:grid-cols-2">
@@ -408,7 +411,7 @@ export function TranslationManager({ nav, theme, t }: { nav: Nav; theme: Theme; 
                   ))}
                 </div>
               </div>
-              {detailLoading && <div className="text-sm text-muted-foreground">{t("common.loading")}</div>}
+              {detailLoading && <LoadingState label={t("common.loading")} rows={3} />}
               {detail?.manifest && (
                 <div className="grid gap-2 md:grid-cols-2">
                   {detail.manifest.chapters.map((chapter) => (
@@ -464,7 +467,7 @@ export function TranslationManager({ nav, theme, t }: { nav: Nav; theme: Theme; 
       </div>
 
       {status && (
-        <div className={`rounded-xl px-4 py-3 text-sm ${status.startsWith("Error:") ? "bg-destructive/10 text-destructive" : "bg-emerald-500/10 text-emerald-600"}`}>
+        <div className={`rounded-xl px-4 py-3 text-sm ${status.startsWith("Error:") ? "bg-destructive/10 text-destructive" : "bg-success-soft text-success"}`}>
           {status}
         </div>
       )}

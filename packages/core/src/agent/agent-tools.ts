@@ -24,6 +24,7 @@ import { runInteractiveFilmCreation, runScriptCreation, runStoryboardCreation } 
 import { createTranslationProjectFromFile } from "../translation/index.js";
 import { runResearchReport } from "../agents/researcher.js";
 import { ingestMaterial } from "../materials/ingest.js";
+import { saveBookMaterial } from "../materials/book-materials.js";
 import { retrieveMaterials } from "../materials/retrieve.js";
 import {
   bindBookReference,
@@ -192,7 +193,7 @@ const SuggestedActionParam = Type.Union([
     text: Type.Optional(Type.String({ description: "Concrete action text." })),
     title: Type.Optional(Type.String({ description: "Short action title." })),
     description: Type.Optional(Type.String({ description: "Optional action description." })),
-  }, { description: "A model may describe an action as an object; InkOS will normalize it to one short action string." }),
+  }, { description: "A model may describe an action as an object; Novel Creation will normalize it to one short action string." }),
 ], { description: "Suggested action as a string or small action object." });
 
 type SuggestedActionParamType = Static<typeof SuggestedActionParam>;
@@ -411,7 +412,7 @@ const ProposeActionParams = Type.Object({
   }, { description: "Structured execution args for action=continuation_import. This imports and rebuilds state directly after confirmation." })),
   spinoffCreate: Type.Optional(Type.Object({
     title: Type.String({ description: "Confirmed side-story title." }),
-    parentBookId: Type.String({ description: "Existing InkOS parent book id whose canon is inherited." }),
+    parentBookId: Type.String({ description: "Existing Novel Creation parent book id whose canon is inherited." }),
     direction: Type.Optional(Type.String({ description: "Confirmed standalone side-story direction." })),
     genre: Type.Optional(Type.String({ description: "Optional genre override; defaults to the parent book." })),
     platform: Type.Optional(Type.Union([
@@ -461,9 +462,9 @@ function proposedActionFallbackTitle(action: ProposeActionParamsType["action"], 
     case "create_book":
       return isZh ? "创建长篇书籍" : "Create a long-form book";
     case "short_run":
-      return isZh ? "生成 InkOS Short" : "Generate InkOS Short";
+      return isZh ? "生成 Novel Creation Short" : "Generate Novel Creation Short";
     case "play_start":
-      return isZh ? "启动 InkOS Play" : "Start InkOS Play";
+      return isZh ? "启动 Novel Creation Play" : "Start Novel Creation Play";
     case "generate_cover":
       return isZh ? "生成封面" : "Generate cover";
     case "fanfic_init":
@@ -494,7 +495,7 @@ function proposedActionFallbackTitle(action: ProposeActionParamsType["action"], 
 function proposedActionFallbackSummary(action: ProposeActionParamsType["action"], isZh: boolean): string {
   return isZh
     ? "确认后将直接执行这条需求；不会要求你再去另一个表单重复填写。"
-    : "After confirmation, InkOS will run this request directly without asking you to repeat it in another form.";
+    : "After confirmation, Novel Creation will run this request directly without asking you to repeat it in another form.";
 }
 
 function compactObject<T extends Record<string, unknown>>(value: T | undefined): T | undefined {
@@ -795,7 +796,11 @@ const SubAgentParams = Type.Object({
     Type.Literal("reviser"),
     Type.Literal("exporter"),
   ]),
-  instruction: Type.String({ description: "Natural language instruction for the sub-agent. For reviser, this is passed as the one-off revision brief." }),
+  // Optional because the architect "revise" path is driven by `feedback`; models
+  // routinely omit `instruction` there, and requiring it failed validation
+  // ("must have required property 'instruction'") before the revise could run.
+  // execute() resolves it from `feedback`, and prepareSubAgentArguments backfills it.
+  instruction: Type.Optional(Type.String({ description: "Natural language instruction for the sub-agent. For reviser, this is passed as the one-off revision brief. Optional when `feedback` is provided (architect revise)." })),
   bookId: Type.Optional(Type.String({
     description: "Optional book ID. In active-book sessions, omit it to use the current active book; if provided, it must match the current active book. For architect creation, this optionally sets the new book ID.",
   })),
@@ -803,7 +808,7 @@ const SubAgentParams = Type.Object({
   chapterCount: Type.Optional(Type.Integer({
     minimum: 1,
     maximum: 20,
-    description: "writer only: number of consecutive new chapters to write in this operation. Default: 1. InkOS writes them sequentially under one book lock.",
+    description: "writer only: number of consecutive new chapters to write in this operation. Default: 1. Novel Creation writes them sequentially under one book lock.",
   })),
   // -- architect params --
   title: Type.Optional(Type.String({ description: "architect only: explicit book title. Required when creating a book." })),
@@ -849,7 +854,7 @@ const ArchitectCreateSubAgentParams = Type.Object({
   agent: Type.Literal("architect"),
   instruction: Type.String({ description: "Confirmed self-contained book-creation instruction for the architect." }),
   bookId: Type.Optional(Type.String({
-    description: "Optional new book ID. Usually omit it and let InkOS derive the ID from title.",
+    description: "Optional new book ID. Usually omit it and let Novel Creation derive the ID from title.",
   })),
   title: Type.Optional(Type.String({ description: "Confirmed book title. Required when creating a book." })),
   genre: Type.Optional(Type.String({ description: "Confirmed book genre." })),
@@ -873,6 +878,12 @@ function prepareSubAgentArguments(args: unknown): SubAgentParamsType {
   }
 
   const prepared = { ...(args as Record<string, unknown>) };
+  // Backfill the instruction from `feedback` so the architect revise path works
+  // whether the model sends one, the other, or both. prepareArguments runs
+  // before schema validation, so this also prevents the validation failure.
+  if ((prepared.instruction === undefined || prepared.instruction === "") && typeof prepared.feedback === "string") {
+    prepared.instruction = prepared.feedback;
+  }
   if ("platform" in prepared) {
     const platform = normalizePlatformId(prepared.platform);
     if (platform) {
@@ -931,7 +942,7 @@ export function createSubAgentTool(
   return {
     name: "sub_agent",
     description: options.architectCreateOnly
-      ? "Create a new long-form InkOS book foundation. This confirmation turn can only call agent='architect'; writing chapters happens after the session is bound to the created book."
+      ? "Create a new long-form Novel Creation book foundation. This confirmation turn can only call agent='architect'; writing chapters happens after the session is bound to the created book."
       : "Delegate a heavy operation to a specialised sub-agent. " +
         "Use agent='architect' to initialise a new book, 'writer' to write the next chapter, " +
         "'auditor' to audit quality, 'reviser' to revise a chapter, 'exporter' to export.",
@@ -946,6 +957,9 @@ export function createSubAgentTool(
     ): Promise<AgentToolResult<unknown>> {
       return runWithAgentTrajectoryRole("subagent", async () => {
         const { agent, instruction, bookId, title, chapterNumber, chapterCount, genre, platform, language, targetChapters, chapterWordCount, revise, feedback, mode, format, approvedOnly } = params;
+        // `instruction` is optional in the schema; the architect revise path is
+        // driven by `feedback`. Resolve one value every downstream branch can use.
+        const resolvedInstruction = instruction ?? feedback ?? "";
         const activatedSkills = mergeActivatedSkillGuidance(
           options.workerSkills?.(agent) ?? [],
           options.activeSkills?.() ?? [],
@@ -984,7 +998,7 @@ export function createSubAgentTool(
                 pipeline,
                 _signal,
                 activatedSkills,
-                () => pipeline.reviseFoundation(targetBookId, feedback ?? instruction),
+                () => pipeline.reviseFoundation(targetBookId, feedback ?? resolvedInstruction),
               );
               progress(`Foundation revised for "${targetBookId}".`);
               return textResult(
@@ -1004,7 +1018,7 @@ export function createSubAgentTool(
                 ? assertSafeBookId(bookId, "architect.bookId")
                 : deriveBookIdFromTitle(resolvedTitle) || `book-${Date.now().toString(36)}`;
             const now = new Date().toISOString();
-            const resolvedLanguage = createBookPayload?.language ?? language ?? inferLanguage(instruction);
+            const resolvedLanguage = createBookPayload?.language ?? language ?? inferLanguage(resolvedInstruction);
             progress(`Starting architect for book "${id}"...`);
             await runPipelineWithAgentContext(
               pipeline,
@@ -1023,7 +1037,7 @@ export function createSubAgentTool(
                   createdAt: now,
                   updatedAt: now,
                 },
-                { externalContext: instruction },
+                { externalContext: resolvedInstruction },
               ),
             );
             progress(`Architect finished — book "${id}" foundation created.`);
@@ -1044,7 +1058,7 @@ export function createSubAgentTool(
                 activatedSkills,
                 () => pipeline.writeChapters(targetBookId, requestedCount, {
                   wordCount: chapterWordCount,
-                  externalContext: instruction,
+                  externalContext: resolvedInstruction,
                   onChapterComplete(result, completedCount, totalCount) {
                     progress(`Writer finished chapter ${result.chapterNumber} (${completedCount}/${totalCount}) for "${targetBookId}".`);
                   },
@@ -1083,7 +1097,7 @@ export function createSubAgentTool(
               pipeline,
               _signal,
               activatedSkills,
-              () => pipeline.writeNextChapter(targetBookId, chapterWordCount, undefined, instruction),
+                () => pipeline.writeNextChapter(targetBookId, chapterWordCount, undefined, resolvedInstruction),
             );
             progress(`Writer finished chapter for "${targetBookId}".`);
             const resultStatus = (result as any).status;
@@ -1154,7 +1168,7 @@ export function createSubAgentTool(
               pipeline,
               _signal,
               activatedSkills,
-              () => pipeline.reviseDraft(targetBookId, chapterNumber, resolvedMode, instruction),
+                () => pipeline.reviseDraft(targetBookId, chapterNumber, resolvedMode, resolvedInstruction),
             );
             const applied = result.applied !== false;
             const resultChapter = result.chapterNumber ?? chapterNumber;
@@ -1422,6 +1436,60 @@ export function createIngestMaterialTool(projectRoot: string): AgentTool<typeof 
 }
 
 // ---------------------------------------------------------------------------
+// 3b. Save Material Tool (save_material) - per-book research library
+// ---------------------------------------------------------------------------
+
+const SaveMaterialParams = Type.Object({
+  facet: Type.String({
+    description: "资料分类，用简洁中文名词，例如：人物 / 制度 / 地图 / 财务 / 军事 / 地理 / 年表 / 风俗 / 其他。",
+  }),
+  title: Type.String({
+    description: "这条资料的标题，例如：六镇与怀朔镇军户制度。",
+  }),
+  content: Type.String({
+    description: "Markdown 正文。只写你确实整理/查阅出的内容；没有把握的不要编造，宁缺毋滥。",
+  }),
+});
+
+type SaveMaterialParamsType = Static<typeof SaveMaterialParams>;
+
+/**
+ * Write a model-collected research note into the current book's library
+ * (`books/<id>/story/materials/<facet>/<title>.md`), so it shows up under that
+ * book's materials view. Absent facets simply do not exist, which is how the UI
+ * hides categories the model never produced.
+ */
+export function createSaveMaterialTool(
+  projectRoot: string,
+  bookId: string,
+): AgentTool<typeof SaveMaterialParams> {
+  const bookDir = join(projectRoot, "books", bookId);
+  return {
+    name: "save_material",
+    description:
+      "Save one research material for the current book, categorised by facet (人物/制度/地图/财务 …). " +
+      "Use it when the user asks you to collect, look up, or organise setting research for this book. " +
+      "It writes a standalone note under the book's story/materials/ folder; it does not touch chapters or canon.",
+    label: "Save Material",
+    parameters: SaveMaterialParams,
+    async execute(
+      _toolCallId: string,
+      params: SaveMaterialParamsType,
+    ): Promise<AgentToolResult<unknown>> {
+      const entry = await saveBookMaterial(bookDir, {
+        facet: params.facet,
+        title: params.title,
+        content: params.content,
+      });
+      return textResult(
+        `已保存资料：${entry.path}（分类：${entry.facet}，约 ${entry.charCount} 字）`,
+        { kind: "book_material_saved", entry },
+      );
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 4. Material Retrieval Tool (retrieve_material)
 // ---------------------------------------------------------------------------
 
@@ -1451,7 +1519,7 @@ export function createRetrieveMaterialTool(projectRoot: string): AgentTool<typeo
     name: "retrieve_material",
     description:
       "Retrieve traceable snippets from previously ingested .inkos/materials reference cards. " +
-      "The agent supplies the semantic query; InkOS returns evidence pointers. This must not mutate canon, chapters, scripts, or play state.",
+      "The agent supplies the semantic query; Novel Creation returns evidence pointers. This must not mutate canon, chapters, scripts, or play state.",
     label: "Retrieve Material",
     parameters: RetrieveMaterialParams,
     async execute(
@@ -1649,8 +1717,8 @@ export function createImportChaptersTool(
   return {
     name: "import_chapters",
     description:
-      "Import an existing novel's chapters from a local file or directory into an InkOS book as real chapters (not reference material). " +
-      "InkOS reverse-engineers foundation/truth files from the imported text and replays every chapter to rebuild story state, so the book can be continued afterwards. " +
+      "Import an existing novel's chapters from a local file or directory into an Novel Creation book as real chapters (not reference material). " +
+      "Novel Creation reverse-engineers foundation/truth files from the imported text and replays every chapter to rebuild story state, so the book can be continued afterwards. " +
       "Use ingest_material instead when the user only wants to archive reference material without touching book chapters.",
     label: "Import Chapters",
     parameters: ImportChaptersParams,
@@ -1738,7 +1806,7 @@ export function createFanficBookTool(
 ): AgentTool<typeof FanficCreateParams> {
   return {
     name: "fanfic_create",
-    description: "Create an InkOS fanfiction book directly from supplied canon/source material after user confirmation.",
+    description: "Create an Novel Creation fanfiction book directly from supplied canon/source material after user confirmation.",
     label: "Create Fanfiction",
     parameters: FanficCreateParams,
     async execute(_toolCallId, params: FanficCreateParamsType, signal, onUpdate) {
@@ -1778,7 +1846,7 @@ export function createFanficBookTool(
 
 const SpinoffCreateParams = Type.Object({
   title: Type.String({ description: "Standalone side-story title." }),
-  parentBookId: Type.String({ description: "Existing InkOS parent book id." }),
+  parentBookId: Type.String({ description: "Existing Novel Creation parent book id." }),
   direction: Type.Optional(Type.String({ description: "Side-story direction that must not advance the parent mainline." })),
   genre: Type.Optional(Type.String()),
   platform: Type.Optional(Type.Union([
@@ -1798,7 +1866,7 @@ export function createSpinoffBookTool(
 ): AgentTool<typeof SpinoffCreateParams> {
   return {
     name: "spinoff_create",
-    description: "Create a standalone side story that inherits canon from an existing InkOS parent book.",
+    description: "Create a standalone side story that inherits canon from an existing Novel Creation parent book.",
     label: "Create Side Story",
     parameters: SpinoffCreateParams,
     async execute(_toolCallId, params: SpinoffCreateParamsType, signal, onUpdate) {
@@ -1859,7 +1927,7 @@ export function createImitationBookTool(
 ): AgentTool<typeof ImitationCreateParams> {
   return {
     name: "imitation_create",
-    description: "Create an original InkOS book and derive its prose style guide from supplied reference writing.",
+    description: "Create an original Novel Creation book and derive its prose style guide from supplied reference writing.",
     label: "Create Style Imitation",
     parameters: ImitationCreateParams,
     async execute(_toolCallId, params: ImitationCreateParamsType, signal, onUpdate) {
@@ -1917,7 +1985,7 @@ export function createContinuationImportTool(
 ): AgentTool<typeof ContinuationImportParams> {
   return {
     name: "continuation_import",
-    description: "Import an uploaded novel into an existing or newly created InkOS book, rebuild story state, and prepare it for continuation.",
+    description: "Import an uploaded novel into an existing or newly created Novel Creation book, rebuild story state, and prepare it for continuation.",
     label: "Import for Continuation",
     parameters: ContinuationImportParams,
     async execute(_toolCallId, params: ContinuationImportParamsType, signal, onUpdate) {
@@ -2177,7 +2245,7 @@ export function createTranslationCreateTool(
   return {
     name: "translation_create",
     description:
-      "Create an InkOS translation project from an EPUB/PDF/TXT/Markdown file. " +
+      "Create an Novel Creation translation project from an EPUB/PDF/TXT/Markdown file. " +
       "This only ingests and segments the source; running the actual translation is a separate long task.",
     label: "Translation",
     parameters: TranslationCreateParams,
@@ -2642,7 +2710,7 @@ export function createPlayStartTool(
   return {
     name: "play_start",
     description:
-      "Start an interactive InkOS Play world directly from chat. " +
+      "Start an interactive Novel Creation Play world directly from chat. " +
       "Use when the user asks to play, roleplay, run an open-world interactive story, or start a Tavern-like scene.",
     label: "Start Play",
     parameters: PlayStartParams,
@@ -2655,7 +2723,7 @@ export function createPlayStartTool(
       _signal?.throwIfAborted();
       onUpdate?.(textResult("Starting interactive world..."));
       if (!pipeline) {
-        throw new Error("play_start requires an initialized InkOS pipeline to create authoritative world state.");
+        throw new Error("play_start requires an initialized Novel Creation pipeline to create authoritative world state.");
       }
       const playPayload = options.actionPayload?.playStart;
       const activatedSkills = resolveProductionToolSkills(options);
@@ -2909,7 +2977,7 @@ export function createPlayEditTool(
   return {
     name: "play_edit",
     description:
-      "Persistently edit the active InkOS Play world card, visual contract, player persona, or entity/role cards without advancing time or narrating a turn. " +
+      "Persistently edit the active Novel Creation Play world card, visual contract, player persona, or entity/role cards without advancing time or narrating a turn. " +
       "Use when the user says to change world rules, visual rules, character goals/persona/status, or long-lived play contracts.",
     label: "Edit Play World",
     parameters: PlayEditParams,
@@ -3009,7 +3077,7 @@ export function createPlayStepTool(
   return {
     name: "play_step",
     description:
-      "Advance the current InkOS Play world by one player action. " +
+      "Advance the current Novel Creation Play world by one player action. " +
       "Use after play_start when the user keeps acting in the interactive scene.",
     label: "Play Step",
     parameters: PlayStepParams,
@@ -3114,7 +3182,7 @@ export function createPlayReviseTool(
   return {
     name: "play_revise",
     description:
-      "Regenerate, edit, or restore the latest InkOS Play turn using saved turn checkpoints. " +
+      "Regenerate, edit, or restore the latest Novel Creation Play turn using saved turn checkpoints. " +
       "Use when the user says to redo the previous turn, try another version, swipe, or replace their last player input.",
     label: "Revise Play Turn",
     parameters: PlayReviseParams,
@@ -3376,7 +3444,9 @@ const PatchChapterTextParams = Type.Object({
   bookId: Type.Optional(Type.String({ description: "Book ID. Omit to use the active book." })),
   chapterNumber: Type.Number({ description: "Chapter number to patch." }),
   targetText: Type.String({ description: "Exact text to replace." }),
-  replacementText: Type.String({ description: "Replacement text." }),
+  replacementText: Type.String({
+    description: "Replacement text. Pass an empty string to delete the matched text.",
+  }),
 });
 
 const DeleteLatestChapterParams = Type.Object({
@@ -3549,25 +3619,32 @@ const ReadParams = Type.Object({
 export interface ReadToolOptions {
   readonly allowSystemPaths?: boolean;
   readonly scope?: "books" | "project";
-}
-
-function resolveReadPath(readRoot: string, requestedPath: string, options: ReadToolOptions): string {
-  if (options.allowSystemPaths && isAbsolute(requestedPath)) {
-    return resolve(requestedPath);
-  }
-  return safeChildPath(readRoot, requestedPath);
+  /**
+   * Active book id. When set (and scope is not "project"), relative paths
+   * resolve under books/<bookId>/ first — so an agent can read `chapters/001.md`
+   * or `story/story_frame.md` without repeating the book id.
+   */
+  readonly bookId?: string | null;
 }
 
 export function createReadTool(
   projectRoot: string,
   options: ReadToolOptions = {},
 ): AgentTool<typeof ReadParams> {
-  const readRoot = options.scope === "project" ? projectRoot : join(projectRoot, "books");
+  const booksRoot = join(projectRoot, "books");
+  const bookScopedRoot = options.scope !== "project" && options.bookId
+    ? join(booksRoot, options.bookId)
+    : undefined;
+  const readRoot = options.scope === "project"
+    ? projectRoot
+    : (bookScopedRoot ?? booksRoot);
   const description = options.allowSystemPaths
-    ? "Read a file. Relative paths resolve under books/; absolute paths read from the system filesystem."
+    ? "Read a file. Relative paths resolve under the current book directory (e.g. chapters/001.md, story/story_frame.md); absolute paths read from the system filesystem."
     : options.scope === "project"
-      ? "Read a UTF-8 file inside the current InkOS project. Path is relative to the project root."
-    : "Read a file from the book directory. Path is relative to books/.";
+      ? "Read a UTF-8 file inside the current Novel Creation project. Path is relative to the project root."
+      : bookScopedRoot
+        ? "Read a file from the current book. Path is relative to the book directory (e.g. chapters/001.md, story/story_frame.md)."
+        : "Read a file from the book directory. Path is relative to books/.";
 
   return {
     name: "read",
@@ -3578,11 +3655,23 @@ export function createReadTool(
       _toolCallId: string,
       params: Static<typeof ReadParams>,
     ): Promise<AgentToolResult<undefined>> {
+      const attempt = (root: string) => (options.allowSystemPaths && isAbsolute(params.path))
+        ? resolve(params.path)
+        : safeChildPath(root, params.path);
       try {
-        const filePath = resolveReadPath(readRoot, params.path, options);
-        const content = await readFile(filePath, "utf-8");
+        const content = await readFile(attempt(readRoot), "utf-8");
         return textResult(content);
       } catch (err: any) {
+        // Fall back to books/ so full paths like "<bookId>/chapters/001.md"
+        // keep working alongside book-relative ones.
+        if (bookScopedRoot && options.scope !== "project" && !(options.allowSystemPaths && isAbsolute(params.path))) {
+          try {
+            const content = await readFile(attempt(booksRoot), "utf-8");
+            return textResult(content);
+          } catch {
+            // fall through to the original error
+          }
+        }
         return textResult(`Failed to read "${params.path}": ${err?.message ?? String(err)}`);
       }
     },

@@ -1,7 +1,9 @@
-import { useState, useEffect, lazy, Suspense } from "react";
+import { useState, useEffect, useCallback, lazy, Suspense } from "react";
 import { useHashRoute } from "./hooks/use-hash-route";
 import type { HashRoute } from "./hooks/use-hash-route";
 import { Sidebar } from "./components/Sidebar";
+import { NovelCreationLogo } from "./components/NovelCreationLogo";
+import { Button } from "./components/ui/button";
 import { Dashboard } from "./pages/Dashboard";
 import { ChatPage } from "./pages/ChatPage";
 import { BookDetail } from "./pages/BookDetail";
@@ -24,6 +26,10 @@ import { StoryGraphTree } from "./pages/StoryGraphTree";
 const FlowView = lazy(() => import("./pages/FlowView"));
 const FilmWizard = lazy(() => import("./pages/FilmWizard"));
 import { LanguageSelector } from "./pages/LanguageSelector";
+import { WorkbenchApp } from "./workbench";
+import { useWorkbench as useWorkbenchStore } from "./workbench/state/store";
+import { DEFAULT_WORKBENCH_AREA } from "./workbench/areas";
+import type { WorkbenchArea } from "./workbench";
 import { BookSidebar, BookSidebarToggle } from "./components/chat/BookSidebar";
 import { useSSE } from "./hooks/use-sse";
 import { useSessionEvents } from "./hooks/use-session-events";
@@ -31,17 +37,22 @@ import { useTheme } from "./hooks/use-theme";
 import { useI18n } from "./hooks/use-i18n";
 import { setAppLanguage, tr } from "./lib/app-language";
 import { postApi, putApi, useApi } from "./hooks/use-api";
-import { Sun, Moon } from "lucide-react";
+import { Sun, Moon, Menu } from "lucide-react";
 import { House } from "lucide-react";
 
 export type { HashRoute as Route } from "./hooks/use-hash-route";
 
 export function deriveActiveBookId(route: HashRoute): string | undefined {
+  // The workbench carries its own book context; it must not be treated as a
+  // book-centreed route or the sidebar highlight and page id drift.
+  if (route.page === "workbench") return undefined;
   if ("bookId" in route) return route.bookId;
   return undefined;
 }
 
-export function isBookCreateChatRoute(route: HashRoute): boolean {
+export function isBookCreateChatRoute(
+  route: HashRoute,
+): route is Extract<HashRoute, { page: "book-create" }> {
   return route.page === "book-create";
 }
 
@@ -61,6 +72,7 @@ export function App() {
   const { data: project, error: projectError, refetch: refetchProject } = useApi<{ language: string; languageExplicit: boolean }>("/project");
   const [showLanguageSelector, setShowLanguageSelector] = useState(false);
   const [ready, setReady] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const isDark = theme === "dark";
 
@@ -78,6 +90,12 @@ export function App() {
     document.documentElement.classList.toggle("dark", isDark);
   }, [isDark]);
 
+  // On compact screens navigation is a drawer. A completed route change closes
+  // it so the newly selected workspace is immediately usable.
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [route]);
+
   useEffect(() => {
     if (project) {
       if (!project.languageExplicit) {
@@ -89,12 +107,29 @@ export function App() {
 
   useSessionEvents(sse, route, setRoute);
 
+  /**
+   * Route changes that leave the workspace unmount the editor. When the
+   * workbench holds unsaved prose, the store parks the move and shows a
+   * confirmation instead of discarding it — `beforeunload` only ever covered
+   * closing the tab, not in-app navigation.
+   */
+  const guardWorkbenchExit = (run: () => void) => {
+    if (route.page !== "workbench") {
+      run();
+      return;
+    }
+    const { requestTransition } = useWorkbenchStore.getState();
+    void requestTransition("离开写作工作区", run);
+  };
+
   const nav = {
-    toDashboard: () => setRoute({ page: "dashboard" }),
+    toDashboard: () => guardWorkbenchExit(() => setRoute({ page: "dashboard" })),
+    toWorkbench: (area: WorkbenchArea = DEFAULT_WORKBENCH_AREA, bookId?: string) =>
+      guardWorkbenchExit(() => setRoute({ page: "workbench", area, ...(bookId ? { bookId } : {}) })),
     toChat: () => setRoute({ page: "chat" }),
     toBook: (bookId: string) => setRoute({ page: "book", bookId }),
     toBookSettings: (bookId: string) => setRoute({ page: "book-settings", bookId }),
-    toBookCreate: () => setRoute({ page: "book-create" }),
+    toBookCreate: (genre?: string) => setRoute({ page: "book-create", ...(genre ? { genre } : {}) }),
     toChapter: (bookId: string, chapterNumber: number) =>
       setRoute({ page: "chapter", bookId, chapterNumber }),
     toAnalytics: (bookId: string) => setRoute({ page: "analytics", bookId }),
@@ -117,37 +152,54 @@ export function App() {
     toFilmStudio: (projectId: string) => setRoute({ page: "film-studio", projectId }),
   };
 
+  // HashRoute is a discriminated union: `bookId` and `area` only exist on the
+  // workbench member, so the context is narrowed once here instead of reading
+  // them off the whole union inside the callbacks.
+  const workbenchBookId = route.page === "workbench" ? route.bookId : undefined;
+  const workbenchArea = route.page === "workbench" ? route.area : undefined;
+
+  // Stable workbench callbacks: the workbench syncs its book context through
+  // them, so they must not be recreated on every render.
+  const goWorkbenchArea = useCallback(
+    (area: WorkbenchArea, bookId?: string) =>
+      setRoute({ page: "workbench", area, ...((bookId ?? workbenchBookId) ? { bookId: bookId ?? workbenchBookId } : {}) }),
+    [workbenchBookId, setRoute],
+  );
+
+  const changeLanguage = useCallback(async (language: "zh" | "en") => {
+    await putApi("/project", { language });
+    refetchProject();
+  }, [refetchProject]);
+
   const activeBookId = deriveActiveBookId(route);
   const activePage =
     activeBookId
       ? `book:${activeBookId}`
-      : route.page === "service-detail"
-        ? "services"
-        : route.page;
+      : route.page === "workbench"
+        ? "workbench"
+        : route.page === "service-detail"
+          ? "services"
+          : route.page;
 
   const startupGate = deriveStartupGate({ ready, projectError });
 
   if (startupGate === "error") {
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center p-6">
-        <div className="max-w-md w-full rounded-2xl border border-destructive/30 bg-destructive/5 p-6 space-y-4">
+      <div className="flex min-h-screen items-center justify-center bg-background p-6">
+        <div className="w-full max-w-md space-y-4 rounded-[var(--radius-lg)] border border-destructive/35 bg-block-soft p-6 shadow-(--nc-shadow-2)">
           <div>
-            <h1 className="text-lg font-semibold text-destructive">无法加载项目配置 / Failed to load project config</h1>
-            <p className="mt-2 text-sm text-muted-foreground break-all">{projectError}</p>
+            <h1 className="text-lg font-semibold text-destructive">
+              无法加载项目配置 / Failed to load project config
+            </h1>
+            <p className="mt-2 text-sm break-all text-muted-foreground">{projectError}</p>
           </div>
           {/* 项目配置没加载出来，语言未知，所以这屏中英双语并排展示。 */}
-          <p className="text-sm text-muted-foreground">
-            请检查项目根目录下的 inkos.json 是否存在且为合法 JSON，然后重试。
+          <p className="text-sm leading-relaxed text-muted-foreground">
+            请检查项目配置文件是否存在且为合法 JSON，然后重试。
             <br />
-            Check that inkos.json in the project root exists and is valid JSON, then retry.
+            Check that the project configuration file exists and is valid JSON, then retry.
           </p>
-          <button
-            type="button"
-            onClick={() => refetchProject()}
-            className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
-          >
-            重试 / Retry
-          </button>
+          <Button onClick={() => refetchProject()}>重试 / Retry</Button>
         </div>
       </div>
     );
@@ -155,8 +207,32 @@ export function App() {
 
   if (startupGate === "loading") {
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
-        <div className="w-12 h-12 border-4 border-primary/20 border-t-primary rounded-full animate-spin" />
+      <div
+        className="flex min-h-screen flex-col items-center justify-center gap-6 bg-background"
+        role="status"
+        aria-live="polite"
+      >
+        <div className="flex items-center gap-3">
+          <NovelCreationLogo className="h-12 w-12" />
+          <div className="flex flex-col">
+            <span className="font-serif text-2xl leading-none italic">Novel</span>
+            <span className="mt-1.5 text-[12px] font-bold text-muted-foreground uppercase">
+              Creation
+            </span>
+          </div>
+        </div>
+        <div className="h-1 w-44 overflow-hidden rounded-full bg-secondary">
+          <span
+            className="block h-full w-1/3 rounded-full bg-primary"
+            style={{
+              backgroundImage:
+                "linear-gradient(90deg, color-mix(in srgb, var(--primary) 55%, transparent), var(--primary))",
+              animation: "nc-app-load 1.4s cubic-bezier(0.16, 1, 0.3, 1) infinite",
+            }}
+          />
+        </div>
+        <p className="text-sm text-muted-foreground">{tr("正在加载项目…", "Loading project…")}</p>
+        <style>{`@keyframes nc-app-load { 0% { transform: translateX(-110%); } 100% { transform: translateX(330%); } }`}</style>
       </div>
     );
   }
@@ -176,54 +252,99 @@ export function App() {
   return (
     <div className="h-screen bg-background text-foreground flex overflow-hidden font-sans">
       {/* Left Sidebar */}
-      <Sidebar nav={nav} activePage={activePage} sse={sse} t={t} />
+      <Sidebar
+        nav={nav}
+        activePage={activePage}
+        sse={sse}
+        t={t}
+        routePage={route.page}
+        workbenchArea={route.page === "workbench" ? route.area ?? DEFAULT_WORKBENCH_AREA : undefined}
+        workbenchBookId={route.page === "workbench" ? route.bookId : undefined}
+        mobileOpen={sidebarOpen}
+        onMobileClose={() => setSidebarOpen(false)}
+      />
+
+      {sidebarOpen && (
+        <button
+          type="button"
+          aria-label={tr("关闭导航", "Close navigation")}
+          className="fixed inset-0 z-40 bg-foreground/20 lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
 
       {/* Center Content */}
-      <div className="flex-1 flex flex-col min-w-0 bg-background/30 backdrop-blur-sm">
-        {/* Header Strip */}
-        <header className="h-14 shrink-0 flex items-center justify-between px-8 border-b border-border/40">
-          <div className="flex items-center gap-2">
-             <button
-               onClick={nav.toDashboard}
-               className="inline-flex items-center gap-2 rounded-lg border border-border/50 bg-card/70 px-3.5 py-2 text-[17px] font-semibold text-foreground hover:bg-secondary/50 transition-colors"
-             >
-               <House size={18} />
-               <span>{t("bread.home")}</span>
-               <span className="text-muted-foreground/70">/</span>
-               <span className="font-serif">InkOS Studio</span>
-             </button>
-          </div>
+        <div className="flex min-w-0 flex-1 flex-col bg-background">
+        {route.page !== "workbench" && (
+          <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-hairline bg-background px-6 max-lg:px-4">
+          <button
+            type="button"
+            className="grid size-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground lg:hidden"
+            onClick={() => setSidebarOpen(true)}
+            aria-label={tr("打开导航", "Open navigation")}
+            title={tr("打开导航", "Open navigation")}
+          >
+            <Menu size={18} aria-hidden="true" />
+          </button>
+          <nav aria-label="面包屑" className="flex min-w-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={nav.toDashboard}
+              className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-1.5 text-sm font-medium text-foreground shadow-(--nc-inset) transition-colors hover:bg-secondary"
+            >
+              <House size={17} aria-hidden="true" />
+              <span>{t("bread.home")}</span>
+              <span className="text-muted-foreground/70" aria-hidden="true">
+                /
+              </span>
+              <span className="font-serif text-[17px]">Novel Creation</span>
+            </button>
+          </nav>
 
-          <div className="flex items-center gap-3">
-            <div className="flex gap-0.5 bg-muted/50 rounded-lg p-0.5">
+          <div className="flex shrink-0 items-center gap-3">
+            <div
+              role="group"
+              aria-label="界面语言"
+              className="flex gap-0.5 rounded-full border border-hairline bg-secondary/70 p-0.5"
+            >
               <button
-                onClick={async () => {
-                  await putApi("/project", { language: "zh" });
-                  refetchProject();
-                }}
-                className={`px-2.5 py-1 text-[16px] font-medium rounded-md ${currentLang === "zh" ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}
+                type="button"
+                aria-pressed={currentLang === "zh"}
+                onClick={() => void changeLanguage("zh")}
+                className={`rounded-full px-2.5 py-1 text-[13px] font-medium transition-colors ${
+                  currentLang === "zh"
+                    ? "bg-card text-foreground shadow-(--nc-shadow-1)"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
               >
                 中
               </button>
               <button
-                onClick={async () => {
-                  await putApi("/project", { language: "en" });
-                  refetchProject();
-                }}
-                className={`px-2.5 py-1 text-[16px] font-medium rounded-md ${currentLang === "en" ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}
+                type="button"
+                aria-pressed={currentLang === "en"}
+                onClick={() => void changeLanguage("en")}
+                className={`rounded-full px-2.5 py-1 text-[13px] font-medium transition-colors ${
+                  currentLang === "en"
+                    ? "bg-card text-foreground shadow-(--nc-shadow-1)"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
               >
                 EN
               </button>
             </div>
 
             <button
+              type="button"
+              aria-label={isDark ? tr("切换到浅色主题", "Switch to light theme") : tr("切换到深色主题", "Switch to dark theme")}
+              title={isDark ? tr("切换到浅色主题", "Switch to light theme") : tr("切换到深色主题", "Switch to dark theme")}
               onClick={() => setTheme(isDark ? "light" : "dark")}
-              className="text-muted-foreground hover:text-foreground transition-colors"
+              className="grid size-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
             >
-              {isDark ? <Sun size={18} /> : <Moon size={18} />}
+              {isDark ? <Sun size={18} aria-hidden="true" /> : <Moon size={18} aria-hidden="true" />}
             </button>
           </div>
-        </header>
+          </header>
+        )}
 
         {/* Main Content Area */}
         <main className="flex-1 relative overflow-y-auto scroll-smooth">
@@ -232,10 +353,31 @@ export function App() {
               <Dashboard nav={nav} sse={sse} theme={theme} t={t} />
             </div>
           )}
+          {route.page === "workbench" && (
+            <div className="absolute inset-0 flex min-w-0">
+              <WorkbenchApp
+                area={route.area ?? DEFAULT_WORKBENCH_AREA}
+                onAreaChange={goWorkbenchArea}
+                bookId={route.bookId}
+                theme={theme}
+                onToggleTheme={() => setTheme(isDark ? "light" : "dark")}
+                onOpenModelConfig={nav.toServices}
+                language={currentLang}
+                onLanguageChange={changeLanguage}
+                onToggleSidebar={() => setSidebarOpen(true)}
+                onCreateBook={nav.toBookCreate}
+                onImportBook={() => nav.toImport()}
+                onOpenAnalytics={(bookId) => { if (bookId) nav.toAnalytics(bookId); }}
+                onOpenResearch={nav.toRadar}
+                events={sse.messages}
+              />
+            </div>
+          )}
           {isBookCreateChatRoute(route) && (
             <div className="absolute inset-0 flex min-w-0">
               <ChatPage
                 mode="book-create"
+                genre={route.genre}
                 nav={nav}
                 theme={theme}
                 t={t}
@@ -299,7 +441,7 @@ export function App() {
             </div>
           )}
           {route.page === "truth" && (
-            <div className="max-w-4xl mx-auto px-6 py-12 md:px-12 lg:py-16 fade-in">
+            <div className="absolute inset-0 flex min-w-0 overflow-hidden">
               <TruthFiles bookId={route.bookId} nav={nav} theme={theme} t={t} />
             </div>
           )}
@@ -314,12 +456,12 @@ export function App() {
             </div>
           )}
           {route.page === "genres" && (
-            <div className="max-w-4xl mx-auto px-6 py-12 md:px-12 lg:py-16 fade-in">
+            <div className="absolute inset-0 flex min-w-0 overflow-hidden">
               <GenreManager nav={nav} theme={theme} t={t} />
             </div>
           )}
           {route.page === "style" && (
-            <div className="max-w-4xl mx-auto px-6 py-12 md:px-12 lg:py-16 fade-in">
+            <div className="absolute inset-0 flex min-w-0 overflow-hidden">
               <StyleManager nav={nav} theme={theme} t={t} />
             </div>
           )}
@@ -380,3 +522,4 @@ export function App() {
     </div>
   );
 }
+

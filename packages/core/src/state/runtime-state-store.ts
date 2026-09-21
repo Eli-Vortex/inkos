@@ -5,6 +5,7 @@ import {
   CurrentStateStateSchema,
   HooksStateSchema,
   StateManifestSchema,
+  type HookRecord,
   type RuntimeStateDelta,
 } from "../models/runtime-state.js";
 import type { Fact, StoredHook, StoredSummary } from "./memory-db.js";
@@ -18,6 +19,7 @@ import { renderChapterSummariesProjection, renderCurrentStateProjection, renderH
 import { applyRuntimeStateDelta, type RuntimeStateSnapshot } from "./state-reducer.js";
 import { validateRuntimeState } from "./state-validator.js";
 import { arbitrateRuntimeStateDeltaHooks } from "../utils/hook-arbiter.js";
+import { loadHookDiagnosticsHistory, recordHookDiagnostics } from "./hook-diagnostics-store.js";
 
 export interface RuntimeStateArtifacts {
   readonly snapshot: RuntimeStateSnapshot;
@@ -185,6 +187,34 @@ export async function saveRuntimeStateSnapshot(
     writeFile(join(stateDir, "hooks.json"), JSON.stringify(snapshot.hooks, null, 2), "utf-8"),
     writeFile(join(stateDir, "chapter_summaries.json"), JSON.stringify(snapshot.chapterSummaries, null, 2), "utf-8"),
   ]);
+
+  // Keep the hook verdicts for this chapter, not just the hooks themselves.
+  // Recording happens here — the single write point — so every path that
+  // advances runtime state leaves a diagnosable history behind.
+  //
+  // Only forward progress is recorded. Restoring or re-saving an older snapshot
+  // would otherwise recompute that chapter's verdicts under today's policy and
+  // overwrite what was actually concluded at the time, which is precisely the
+  // silent rewrite the stored policyVersion exists to prevent.
+  await recordHookDiagnosticsIfForward({
+    bookDir,
+    chapter: snapshot.manifest.lastAppliedChapter,
+    hooks: snapshot.hooks.hooks,
+  });
+}
+
+async function recordHookDiagnosticsIfForward(params: {
+  readonly bookDir: string;
+  readonly chapter: number;
+  readonly hooks: ReadonlyArray<HookRecord>;
+}): Promise<void> {
+  const history = await loadHookDiagnosticsHistory(params.bookDir);
+  const newest = history.snapshots.reduce(
+    (latest, snapshot) => Math.max(latest, snapshot.chapter),
+    0,
+  );
+  if (params.chapter < newest) return;
+  await recordHookDiagnostics(params);
 }
 
 export async function loadNarrativeMemorySeed(bookDir: string): Promise<NarrativeMemorySeed> {
@@ -249,3 +279,4 @@ async function readJsonOrNull<T>(
     return null;
   }
 }
+

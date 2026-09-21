@@ -55,7 +55,8 @@ export const InteractionRequestSchema = z.object({
   oldValue: z.string().min(1).optional(),
   newValue: z.string().min(1).optional(),
   targetText: z.string().min(1).optional(),
-  replacementText: z.string().min(1).optional(),
+  // Empty replacement is allowed: it deletes the matched text.
+  replacementText: z.string().optional(),
   fullText: z.string().min(1).optional(),
   instruction: z.string().min(1).optional(),
   mode: AutomationModeSchema.optional(),

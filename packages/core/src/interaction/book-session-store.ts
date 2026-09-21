@@ -3,10 +3,12 @@ import { createBookSession } from "./session.js";
 import type { BookSession, PlayMode, SessionKind } from "./session.js";
 import {
   appendTranscriptEvents,
+  invalidateTranscriptCache,
   legacyBookSessionPath,
   readTranscriptEvents,
   sessionsDir,
   transcriptPath,
+  transcriptVersion,
 } from "./session-transcript.js";
 import {
   migrateLegacyBookSessionToTranscript,
@@ -134,6 +136,12 @@ export interface BookSessionSummary {
   readonly updatedAt: number;
 }
 
+/** Derived summaries keyed by session, valid while the transcript is unchanged. */
+const sessionSummaryCache = new Map<
+  string,
+  { readonly version: string | null; readonly summary: BookSessionSummary | null }
+>();
+
 export async function listBookSessions(
   projectRoot: string,
   bookId: string | null,
@@ -157,23 +165,39 @@ export async function listBookSessions(
 
   const summaries = await Promise.all(
     [...sessionIds].map(async (sessionId): Promise<BookSessionSummary | null> => {
+      // Memoize the derived summary against the transcript's change token: a
+      // sidebar refresh with unchanged transcripts must not rebuild every
+      // session's full message history.
+      const cacheKey = `${projectRoot}:${sessionId}`;
+      const version = await transcriptVersion(projectRoot, sessionId);
+      // The cached summary is NOT filtered by bookId: caching a per-book "null"
+      // would hide the session from a later query for a different book.
+      const matchesBook = (summary: BookSessionSummary | null): BookSessionSummary | null =>
+        summary && summary.bookId === bookId ? summary : null;
+
+      const cached = sessionSummaryCache.get(cacheKey);
+      if (cached && cached.version === version) return matchesBook(cached.summary);
+
+      let summary: BookSessionSummary | null = null;
       try {
         const session = await loadBookSession(projectRoot, sessionId);
-        if (!session || session.bookId !== bookId) return null;
-
-        return {
-          sessionId: session.sessionId,
-          bookId: session.bookId,
-          sessionKind: session.sessionKind,
-          playMode: session.playMode,
-          title: session.title,
-          messageCount: session.messages.length,
-          createdAt: session.createdAt,
-          updatedAt: session.updatedAt,
-        };
+        if (session) {
+          summary = {
+            sessionId: session.sessionId,
+            bookId: session.bookId,
+            sessionKind: session.sessionKind,
+            playMode: session.playMode,
+            title: session.title,
+            messageCount: session.messages.length,
+            createdAt: session.createdAt,
+            updatedAt: session.updatedAt,
+          };
+        }
       } catch {
-        return null;
+        summary = null;
       }
+      sessionSummaryCache.set(cacheKey, { version, summary });
+      return matchesBook(summary);
     }),
   );
 
@@ -198,6 +222,8 @@ export async function deleteBookSession(
   projectRoot: string,
   sessionId: string,
 ): Promise<void> {
+  invalidateTranscriptCache(projectRoot, sessionId);
+  sessionSummaryCache.delete(`${projectRoot}:${sessionId}`);
   await Promise.all([
     unlink(transcriptPath(projectRoot, sessionId)).catch(() => undefined),
     unlink(legacyBookSessionPath(projectRoot, sessionId)).catch(() => undefined),

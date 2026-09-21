@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, Eye, EyeOff, Loader2, Plus, Search, X } from "lucide-react";
+import { Check, ChevronDown, Eye, EyeOff, Loader2, Plus, Search, X } from "lucide-react";
 import { GROUP_ORDER, getGroupDescription, getGroupLabel, getGroupShortLabel } from "../constants/service-groups";
 import { tr } from "../lib/app-language";
 import { fetchJson } from "../hooks/use-api";
@@ -30,23 +30,23 @@ function ServiceCard({ svc, onClick }: { svc: ServiceInfo; onClick: () => void }
   return (
     <div
       className={[
-        "flex min-h-[92px] flex-col gap-2 rounded-lg border p-5 text-left transition-all hover:shadow-sm",
+        "flex flex-col gap-1.5 rounded-xl border p-3.5 text-left transition-all hover:border-primary/40 hover:shadow-xs",
         svc.connected
-          ? "border-emerald-500/30 bg-emerald-500/[0.03]"
-          : "border-dashed border-border/40",
+          ? "border-success/40 bg-success/[0.04]"
+          : "border-border/60 bg-card/60 hover:bg-secondary/20",
       ].join(" ")}
     >
-      <button onClick={onClick} className="flex flex-1 flex-col gap-2 text-left">
-        <div className="flex items-center justify-between gap-3">
-          <span className="truncate text-sm font-medium">{svc.label}</span>
-          <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${svc.connected ? "bg-emerald-500" : "bg-muted-foreground/30"}`} />
+      <button onClick={onClick} className="flex flex-1 flex-col gap-1 text-left">
+        <div className="flex items-center justify-between gap-2">
+          <span className="truncate text-xs font-bold text-foreground">{svc.label}</span>
+          <span className={`h-2 w-2 rounded-full shrink-0 ${svc.connected ? "bg-success" : "bg-muted-foreground/30"}`} />
         </div>
-        <span className="text-xs text-muted-foreground/60">
+        <span className="text-[11px] text-muted-foreground/75 font-medium">
           {svc.connected ? tr("已连接", "Connected") : tr("未配置", "Not configured")}
         </span>
       </button>
       {quickLinks.length > 0 && (
-        <ServiceQuickLinks serviceId={svc.service} variant="card" className="pt-1" />
+        <ServiceQuickLinks serviceId={svc.service} variant="card" className="pt-0.5" />
       )}
     </div>
   );
@@ -167,7 +167,7 @@ function CoverConfigCard() {
           </p>
         </div>
         {selected?.connected && (
-          <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-500">
+          <span className="rounded-full bg-success-soft px-2 py-0.5 text-[10px] font-medium text-success">
             {tr("已有密钥", "Key saved")}
           </span>
         )}
@@ -247,7 +247,7 @@ function CoverConfigCard() {
           {tr("保存封面配置", "Save cover config")}
         </button>
         {message && (
-          <span className={`text-xs ${status === "error" ? "text-destructive" : "text-emerald-500"}`}>
+          <span className={`text-xs ${status === "error" ? "text-destructive" : "text-success"}`}>
             {message}
           </span>
         )}
@@ -267,6 +267,16 @@ export function ServiceListPage({ nav }: { nav: Nav }) {
   const [query, setQuery] = useState("");
   const [selectedGroups, setSelectedGroups] = useState<Set<EndpointGroup>>(new Set());
   const [onlyConnected, setOnlyConnected] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<EndpointGroup>>(new Set());
+
+  const toggleGroupCollapse = (group: EndpointGroup) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(group)) next.delete(group);
+      else next.add(group);
+      return next;
+    });
+  };
 
   const bankServices = useMemo(
     () => services.filter((s) => !s.service.startsWith("custom")),
@@ -410,16 +420,61 @@ export function ServiceListPage({ nav }: { nav: Nav }) {
         )}
       </div>
 
-      <label className="inline-flex cursor-pointer select-none items-center gap-2 text-xs text-muted-foreground">
-        <input
-          type="checkbox"
-          checked={onlyConnected}
-          onChange={(event) => setOnlyConnected(event.target.checked)}
-        />
-        <span>{tr("只看已连接", "Connected only")} ({connectedCount})</span>
-      </label>
+      <div className="flex items-center justify-between">
+        <label className="inline-flex cursor-pointer select-none items-center gap-2 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={onlyConnected}
+            onChange={(event) => setOnlyConnected(event.target.checked)}
+          />
+          <span>{tr("只看已连接", "Connected only")} ({connectedCount})</span>
+        </label>
+
+        {!loading && (
+          <button
+            type="button"
+            onClick={() => {
+              if (collapsedGroups.size === GROUP_ORDER.length) {
+                setCollapsedGroups(new Set());
+              } else {
+                setCollapsedGroups(new Set(GROUP_ORDER));
+              }
+            }}
+            className="text-xs text-muted-foreground/70 hover:text-foreground transition-colors"
+          >
+            {collapsedGroups.size === GROUP_ORDER.length
+              ? tr("展开所有分组", "Expand all groups")
+              : tr("折叠所有分组", "Collapse all groups")}
+          </button>
+        )}
+      </div>
 
       <div className="h-px bg-border/30" />
+
+      {/* Bounded results region: the provider list scrolls inside its own box
+          instead of stretching the page indefinitely. */}
+      <div className="max-h-[calc(100vh-360px)] min-h-[320px] space-y-3 overflow-y-auto pr-1">
+
+      {/* ── Active Connected Services Spotlight ── */}
+      {!onlyConnected && connectedCount > 0 && (
+        <section className="space-y-2.5 rounded-2xl border border-success/30 bg-success/[0.02] p-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-success flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-success animate-pulse" />
+              {tr("已连接服务商", "Active Providers")} ({connectedCount})
+            </h2>
+          </div>
+          <div className="grid grid-cols-2 gap-2.5">
+            {services.filter((s) => s.connected).map((svc) => (
+              <ServiceCard
+                key={svc.service}
+                svc={svc}
+                onClick={() => nav.toServiceDetail(svc.service)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
 
       {loading && (
         <div className="grid grid-cols-2 gap-3">
@@ -430,27 +485,45 @@ export function ServiceListPage({ nav }: { nav: Nav }) {
       {!loading && GROUP_ORDER.map((group) => {
         const list = byGroup[group];
         if (!list || list.length === 0) return null;
+        const isCollapsed = collapsedGroups.has(group);
         return (
-          <section key={group} className="space-y-3">
-            <div className="space-y-1">
-              <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground/70">
-                {getGroupLabel(group)}
-              </h2>
-              {getGroupDescription(group) && (
-                <p className="text-xs text-muted-foreground/60">
-                  {getGroupDescription(group)}
-                </p>
-              )}
+          <section key={group} className="space-y-2.5 rounded-xl border border-border/40 p-3.5 bg-card/40">
+            <div
+              className="flex items-center justify-between cursor-pointer select-none"
+              onClick={() => toggleGroupCollapse(group)}
+            >
+              <div>
+                <h2 className="text-xs font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+                  <span>{getGroupLabel(group)}</span>
+                  <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-secondary text-muted-foreground font-mono">
+                    {list.length}
+                  </span>
+                </h2>
+                {getGroupDescription(group) && (
+                  <p className="text-[11px] text-muted-foreground/60 mt-0.5">
+                    {getGroupDescription(group)}
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                className="flex items-center gap-1 text-xs text-muted-foreground/60 hover:text-foreground transition-colors p-1"
+                aria-label={isCollapsed ? "展开" : "收起"}
+              >
+                <ChevronDown size={14} className={`transition-transform duration-200 ${isCollapsed ? "-rotate-90" : ""}`} />
+              </button>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              {list.map((svc) => (
-                <ServiceCard
-                  key={svc.service}
-                  svc={svc}
-                  onClick={() => nav.toServiceDetail(svc.service)}
-                />
-              ))}
-            </div>
+            {!isCollapsed && (
+              <div className="grid grid-cols-2 gap-2.5 pt-1 border-t border-border/20">
+                {list.map((svc) => (
+                  <ServiceCard
+                    key={svc.service}
+                    svc={svc}
+                    onClick={() => nav.toServiceDetail(svc.service)}
+                  />
+                ))}
+              </div>
+            )}
           </section>
         );
       })}
@@ -486,6 +559,8 @@ export function ServiceListPage({ nav }: { nav: Nav }) {
           {tr("没有匹配的服务商", "No matching providers")}
         </div>
       )}
+
+      </div>
     </div>
   );
 }

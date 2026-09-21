@@ -11,6 +11,34 @@ import {
 
 export const DEFAULT_HOOK_LOOKAHEAD_CHAPTERS = 3;
 
+export type HookEvidenceKind = "planted" | "advanced" | "paid-off" | "contradicted";
+
+export interface HookEvidenceEntry {
+  readonly chapter: number;
+  readonly quote: string;
+  readonly kind: HookEvidenceKind;
+}
+
+/**
+ * Read a hook's evidence trail without caring whether it has one.
+ *
+ * A hook recorded before evidence tracking returns an empty trail, which the UI
+ * must present as "recorded before evidence tracking" rather than "no evidence
+ * exists" — the two are different claims and only the first is true.
+ */
+export function hookEvidence(
+  hook: { readonly evidence?: ReadonlyArray<HookEvidenceEntry> },
+): readonly HookEvidenceEntry[] {
+  return hook.evidence ?? [];
+}
+
+/** Whether the hook's ledger predates evidence tracking. */
+export function hasEvidenceTrail(
+  hook: { readonly evidence?: ReadonlyArray<HookEvidenceEntry> },
+): boolean {
+  return (hook.evidence?.length ?? 0) > 0;
+}
+
 const HOOK_STATUS_ALIASES: ReadonlyMap<string, HookStatus> = new Map([
   ...[
     "resolved", "closed", "done", "paid_off", "paid-off", "paid off",

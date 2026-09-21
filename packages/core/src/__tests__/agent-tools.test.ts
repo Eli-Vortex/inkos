@@ -819,6 +819,25 @@ describe("agent deterministic writing tools", () => {
     );
   });
 
+  it("accepts a feedback-only architect revise and backfills the instruction", async () => {
+    const pipeline = contextPipeline({
+      reviseFoundation: vi.fn(async () => undefined),
+    });
+    const tool = createSubAgentTool(pipeline as never, "demo-book");
+
+    // The model commonly sends only `feedback` for a revise; prepareArguments
+    // backfills `instruction` so schema validation does not reject the call.
+    const prepared = tool.prepareArguments?.({ agent: "architect", revise: true, feedback: "改成段落式架构稿" });
+    expect(prepared).toMatchObject({ instruction: "改成段落式架构稿" });
+
+    await tool.execute("tool-revise", {
+      agent: "architect",
+      revise: true,
+      feedback: "改成段落式架构稿",
+    });
+    expect(pipeline.reviseFoundation).toHaveBeenCalledWith("demo-book", "改成段落式架构稿");
+  });
+
   it("uses confirmed create-book payload when architect tool args drift or omit defaults", async () => {
     const pipeline = contextPipeline({
       initBook: vi.fn(async () => undefined),
@@ -1048,7 +1067,7 @@ describe("agent deterministic writing tools", () => {
   it("injects the host-selected long-writing Skill into the worker without relying on agent intent", async () => {
     const longWritingSkill = {
       skill: {
-        id: "inkos-long-writing",
+        id: "novel-creation-long-writing",
         name: "Long-form narrative craft",
         description: "Shared long-form worker method.",
         body: "Build scenes through objective, resistance, turn, and consequence.",
@@ -1075,7 +1094,7 @@ describe("agent deterministic writing tools", () => {
     );
     expect(result.details).toMatchObject({
       kind: "chapter_written",
-      skillIds: ["inkos-long-writing"],
+      skillIds: ["novel-creation-long-writing"],
     });
   });
 
@@ -1415,6 +1434,21 @@ describe("agent deterministic writing tools", () => {
       expect(result.content[0].text).toBe(longContent);
       expect(result.content[0].text).not.toContain("[truncated");
     }
+  });
+
+  it("resolves book-relative read paths against the active book", async () => {
+    const chaptersDir = join(state.bookDir("harbor"), "chapters");
+    await mkdir(chaptersDir, { recursive: true });
+    await writeFile(join(chaptersDir, "001.md"), "# 第1章\n\n正文", "utf-8");
+    const tool = createReadTool(root, { bookId: "harbor" });
+
+    // Book-relative path (what an agent naturally writes).
+    const relative = await tool.execute("tool-read-book-rel", { path: "chapters/001.md" });
+    expect(relative.content[0]).toEqual({ type: "text", text: "# 第1章\n\n正文" });
+
+    // Full path from the books root still works via fallback.
+    const full = await tool.execute("tool-read-book-full", { path: "harbor/chapters/001.md" });
+    expect(full.content[0]).toEqual({ type: "text", text: "# 第1章\n\n正文" });
   });
 
   it("reads project-local production sources without escaping the project root", async () => {

@@ -391,14 +391,14 @@ describe("runAgentSession cache — bookId switch", () => {
     );
 
     expect(result.responseText).toBe("");
-    expect(result.errorMessage).toContain("InkOS context window guard");
+    expect(result.errorMessage).toContain("Novel Creation context window guard");
     expect(streamCalls).toHaveLength(0);
     const events = await readTranscriptEvents(projectRoot, "s-context-window");
     expect(events.some(
       (event: any) =>
         event.type === "request_failed" &&
         typeof event.error === "string" &&
-        event.error.includes("InkOS context window guard"),
+        event.error.includes("Novel Creation context window guard"),
     )).toBe(true);
   });
 
@@ -1223,6 +1223,7 @@ describe("runAgentSession cache — bookId switch", () => {
       "delete_latest_chapter",
       "research_web",
       "ingest_material",
+      "save_material",
       "retrieve_material",
       "manage_book_reference",
       "import_chapters",
@@ -1250,6 +1251,7 @@ describe("runAgentSession cache — bookId switch", () => {
       "read",
       "research_web",
       "ingest_material",
+      "save_material",
       "retrieve_material",
       "manage_book_reference",
       "create_narrative_forecast",
@@ -1278,6 +1280,7 @@ describe("runAgentSession cache — bookId switch", () => {
       "delete_latest_chapter",
       "research_web",
       "ingest_material",
+      "save_material",
       "retrieve_material",
       "manage_book_reference",
       "import_chapters",
@@ -1308,6 +1311,7 @@ describe("runAgentSession cache — bookId switch", () => {
       "resync_chapter_state",
       "delete_latest_chapter",
       "ingest_material",
+      "save_material",
       "retrieve_material",
       "manage_book_reference",
       "grep",

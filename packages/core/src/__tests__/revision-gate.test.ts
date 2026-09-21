@@ -22,8 +22,10 @@ describe("resolveRevisionGate", () => {
     )).toBe("always");
   });
 
-  it("defaults to strict when neither book nor project sets a revisionGate", () => {
-    expect(resolveRevisionGate({})).toBe("strict");
-    expect(resolveRevisionGate({ writing: {} }, {})).toBe("strict");
+  it("defaults to lenient when neither book nor project sets a revisionGate", () => {
+    // Manual revisions are user-initiated; "lenient" applies them unless the
+    // audit worsens. "strict" silently discarded polish/rewrite on clean chapters.
+    expect(resolveRevisionGate({})).toBe("lenient");
+    expect(resolveRevisionGate({ writing: {} }, {})).toBe("lenient");
   });
 });

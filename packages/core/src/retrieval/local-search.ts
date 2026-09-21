@@ -41,8 +41,7 @@ export class LocalSearchIndex {
   }
 
   replaceScope(scope: string, documents: ReadonlyArray<SearchDocument>): void {
-    const normalized = documents.map((document) => normalizeDocument(document, scope));
-    const keepIds = new Set(normalized.map((document) => document.id));
+    const keepIds = new Set(documents.map((document) => document.id));
     const existing = this.db.prepare(
       "SELECT document_id AS id, content_hash AS contentHash FROM retrieval_documents WHERE scope = ?",
     ).all(scope) as unknown as ReadonlyArray<{ readonly id: string; readonly contentHash: string }>;
@@ -69,19 +68,25 @@ export class LocalSearchIndex {
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      for (const document of normalized) {
-        if (existingHashes.get(document.id) === document.contentHash) continue;
+      for (const document of documents) {
+        const metadataJson = JSON.stringify(document.metadata ?? {});
+        // Hash first: tokenization (Intl.Segmenter) is the expensive part, and an
+        // unchanged document used to pay for it before the hash short-circuit.
+        const contentHash = documentContentHash(document, metadataJson);
+        if (existingHashes.get(document.id) === contentHash) continue;
+        const titleTokens = tokenizeSearchText(document.title).join(" ");
+        const bodyTokens = tokenizeSearchText(document.body).join(" ");
         upsert.run(
           document.id,
-          document.scope,
+          scope,
           document.kind,
           document.source,
           document.title,
           document.body,
-          document.titleTokens,
-          document.bodyTokens,
-          document.metadataJson,
-          document.contentHash,
+          titleTokens,
+          bodyTokens,
+          metadataJson,
+          contentHash,
         );
       }
       for (const row of existing) {
@@ -255,21 +260,10 @@ function buildMatchQuery(query: string): string {
   return tokens.map((token) => `"${token.replaceAll('"', '""')}"`).join(" OR ");
 }
 
-function normalizeDocument(document: SearchDocument, scope: string) {
-  const normalized = { ...document, scope };
-  const metadataJson = JSON.stringify(document.metadata ?? {});
-  const titleTokens = tokenizeSearchText(document.title).join(" ");
-  const bodyTokens = tokenizeSearchText(document.body).join(" ");
-  const contentHash = createHash("sha256")
-    .update([normalized.kind, normalized.source, normalized.title, normalized.body, metadataJson].join("\0"))
+function documentContentHash(document: SearchDocument, metadataJson: string): string {
+  return createHash("sha256")
+    .update([document.kind, document.source, document.title, document.body, metadataJson].join("\0"))
     .digest("hex");
-  return {
-    ...normalized,
-    metadataJson,
-    titleTokens,
-    bodyTokens,
-    contentHash,
-  };
 }
 
 function parseMetadata(value: string): Readonly<Record<string, unknown>> {

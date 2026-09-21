@@ -1,12 +1,50 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { TranscriptEventSchema, type TranscriptEvent } from "./session-transcript-schema.js";
 import type { SessionKind, TranscriptRole } from "./session-transcript-schema.js";
+import { commitAtomicFileSet } from "../utils/atomic-file-set.js";
 
 const SESSIONS_DIR = ".inkos/sessions";
 const appendQueues = new Map<string, Promise<void>>();
+
+/**
+ * Parsed-transcript cache keyed by session.
+ *
+ * The transcript is read (and Zod-parsed line by line) on every append and on
+ * every turn's `latestCommittedSeq`. That made a session O(n²) over its life.
+ * A JSONL file only ever grows by append, so a size+mtime match means the cached
+ * parse is still current and the expensive read/parse can be skipped.
+ */
+interface TranscriptCacheEntry {
+  readonly events: TranscriptEvent[];
+  readonly size: number;
+  readonly mtimeMs: number;
+}
+const transcriptCache = new Map<string, TranscriptCacheEntry>();
+
+/** Drop the cached parse for a session after an out-of-band rewrite/delete. */
+export function invalidateTranscriptCache(projectRoot: string, sessionId: string): void {
+  transcriptCache.delete(`${projectRoot}:${sessionId}`);
+}
+
+/**
+ * A cheap change token for a session transcript (`size:mtime`), or null when the
+ * file is absent. Callers cache derived values against this instead of re-reading
+ * the whole transcript on every list refresh.
+ */
+export async function transcriptVersion(
+  projectRoot: string,
+  sessionId: string,
+): Promise<string | null> {
+  try {
+    const fileStat = await stat(transcriptPath(projectRoot, sessionId));
+    return `${fileStat.size}:${fileStat.mtimeMs}`;
+  } catch {
+    return null;
+  }
+}
 
 export function sessionsDir(projectRoot: string): string {
   return join(projectRoot, SESSIONS_DIR);
@@ -24,10 +62,26 @@ export async function readTranscriptEvents(
   projectRoot: string,
   sessionId: string,
 ): Promise<TranscriptEvent[]> {
+  const key = `${projectRoot}:${sessionId}`;
+  const path = transcriptPath(projectRoot, sessionId);
+
+  let fileStat: Awaited<ReturnType<typeof stat>>;
+  try {
+    fileStat = await stat(path);
+  } catch {
+    transcriptCache.delete(key);
+    return [];
+  }
+  const cached = transcriptCache.get(key);
+  if (cached && cached.size === fileStat.size && cached.mtimeMs === fileStat.mtimeMs) {
+    return cached.events;
+  }
+
   let raw: string;
   try {
-    raw = await readFile(transcriptPath(projectRoot, sessionId), "utf-8");
+    raw = await readFile(path, "utf-8");
   } catch {
+    transcriptCache.delete(key);
     return [];
   }
 
@@ -42,7 +96,9 @@ export async function readTranscriptEvents(
     }
   }
 
-  return events.sort((a, b) => a.seq - b.seq);
+  const sorted = events.sort((a, b) => a.seq - b.seq);
+  transcriptCache.set(key, { events: sorted, size: fileStat.size, mtimeMs: fileStat.mtimeMs });
+  return sorted;
 }
 
 export async function nextTranscriptSeq(projectRoot: string, sessionId: string): Promise<number> {
@@ -77,11 +133,24 @@ export async function appendTranscriptEvents(
     if (result.length === 0) return;
 
     await mkdir(sessionsDir(projectRoot), { recursive: true });
+    const path = transcriptPath(projectRoot, sessionId);
     await appendFile(
-      transcriptPath(projectRoot, sessionId),
+      path,
       `${result.map((event) => JSON.stringify(event)).join("\n")}\n`,
       "utf-8",
     );
+    // Refresh the parse cache in place so the next append/turn does not re-read
+    // and re-parse the whole file. `events` is already the current full history.
+    try {
+      const after = await stat(path);
+      transcriptCache.set(key, {
+        events: [...events, ...result],
+        size: after.size,
+        mtimeMs: after.mtimeMs,
+      });
+    } catch {
+      invalidateTranscriptCache(projectRoot, sessionId);
+    }
   });
 
   appendQueues.set(key, next.catch(() => undefined));
@@ -89,7 +158,49 @@ export async function appendTranscriptEvents(
   return result;
 }
 
-function transcriptRoleForMessage(message: AgentMessage): TranscriptRole | null {
+/**
+ * Drop the last `dropTurns` request turns from a session transcript.
+ *
+ * This is chat "rewind": an unsatisfactory reply — and the user turn that
+ * prompted it — is removed so the author can send a different message. Whole
+ * request turns are removed together (request_started/message/toolResult/
+ * request_committed all carry the same `requestId`), so the transcript stays
+ * reconstructable. The rewrite is atomic and the parse cache is invalidated.
+ */
+export async function truncateTranscriptTurns(
+  projectRoot: string,
+  sessionId: string,
+  dropTurns: number,
+): Promise<number> {
+  const events = await readTranscriptEvents(projectRoot, sessionId);
+  const requestIds: string[] = [];
+  for (const event of events) {
+    const requestId = (event as { requestId?: unknown }).requestId;
+    if (typeof requestId === "string" && !requestIds.includes(requestId)) {
+      requestIds.push(requestId);
+    }
+  }
+  const dropCount = Math.max(0, Math.min(requestIds.length, Math.floor(dropTurns)));
+  if (dropCount === 0) return 0;
+
+  const drop = new Set(requestIds.slice(requestIds.length - dropCount));
+  const kept = events.filter((event) => {
+    const requestId = (event as { requestId?: unknown }).requestId;
+    return typeof requestId !== "string" || !drop.has(requestId);
+  });
+
+  await commitAtomicFileSet({
+    rootDir: sessionsDir(projectRoot),
+    writes: [{
+      relativePath: `${sessionId}.jsonl`,
+      content: kept.length > 0 ? `${kept.map((event) => JSON.stringify(event)).join("\n")}\n` : "",
+    }],
+  });
+  invalidateTranscriptCache(projectRoot, sessionId);
+  return dropCount;
+}
+
+export function transcriptRoleForMessage(message: AgentMessage): TranscriptRole | null {
   if (!message || typeof message !== "object" || !("role" in message)) return null;
   const role = (message as { role?: unknown }).role;
   return role === "user" || role === "assistant" || role === "toolResult" || role === "system"
@@ -97,7 +208,7 @@ function transcriptRoleForMessage(message: AgentMessage): TranscriptRole | null 
     : null;
 }
 
-function messageTimestamp(message: AgentMessage): number {
+export function messageTimestamp(message: AgentMessage): number {
   if (message && typeof message === "object") {
     const timestamp = (message as { timestamp?: unknown }).timestamp;
     if (typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp >= 0) {
@@ -107,7 +218,7 @@ function messageTimestamp(message: AgentMessage): number {
   return Date.now();
 }
 
-function toolCallIdForMessage(message: AgentMessage): string | undefined {
+export function toolCallIdForMessage(message: AgentMessage): string | undefined {
   if (!message || typeof message !== "object") return undefined;
   if ((message as { role?: unknown }).role === "toolResult") {
     const toolCallId = (message as { toolCallId?: unknown }).toolCallId;

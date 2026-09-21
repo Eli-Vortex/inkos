@@ -10,6 +10,71 @@ export interface CreativeOutput {
   readonly preWriteCheck: string;
 }
 
+export function cleanChapterTitle(
+  rawTitle: string,
+  chapterNumber?: number,
+  countingMode: LengthCountingMode = "zh_chars",
+): string {
+  let t = (rawTitle ?? "").trim();
+  // Remove markdown headers # ...
+  t = t.replace(/^#+\s*/, "");
+  // Remove leading/trailing quotes, brackets, guillemets
+  t = t.replace(/^[“"《【\[「『]+|[”"》】\]」』]+$/g, "");
+  // Remove duplicate chapter prefixes like "第2章", "第2章：", "第2章 ", "Chapter 2:", "第2回"
+  t = t.replace(/^(?:第\s*\d+\s*[章节回卷篇]|Chapter\s*\d+)[:：、\s-]*/i, "");
+  // Remove Chinese numeral chapter prefixes like "第二章："
+  t = t.replace(/^(?:第\s*[一二三四五六七八九十百千]+\s*[章节回卷篇])[:：、\s-]*/, "");
+  // Strip leading punctuation
+  t = t.replace(/^[:：、\s-]+/, "").trim();
+  return t || defaultChapterTitle(chapterNumber ?? 1, countingMode);
+}
+
+export function cleanChapterProse(rawContent: string, title?: string, chapterNumber?: number): string {
+  let prose = (rawContent ?? "").trim();
+
+  // 1. Strip any markdown table at the start (such as PRE_WRITE_CHECK table | 检查项 | 本章记录 | 备注 |)
+  if (/^\s*\|[^\n]+\|\s*\n\s*\|[-:|\s]+\|\s*\n/.test(prose)) {
+    const lines = prose.split("\n");
+    let inTable = true;
+    let proseStart = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!.trim();
+      if (inTable) {
+        if (line.startsWith("|") || line.startsWith("（必须输出") || line.startsWith("===") || line === "") {
+          continue;
+        } else {
+          inTable = false;
+          proseStart = i;
+          break;
+        }
+      }
+    }
+    if (!inTable) {
+      prose = lines.slice(proseStart).join("\n").trim();
+    }
+  }
+
+  // 2. Strip any leftover tag markers or pre-write instructions
+  prose = prose.replace(/^===\s*[A-Z_]+\s*===\s*$/gm, "");
+  prose = prose.replace(/^[（(]必须输出Markdown表格[^\n]*[）)]\s*$/gm, "");
+
+  // 3. Strip any leading `# 第N章 ...` heading from the start of the prose
+  // because writer.saveChapter prepends the canonical chapter heading
+  prose = prose.replace(/^#\s*(?:第\s*\d+\s*[章节回卷篇]|Chapter\s*\d+)[^\n]*\n+/im, "").trim();
+
+  // 4. Strip duplicate standalone title at the very start if it matches the chapter title
+  if (title) {
+    const trimmedTitle = title.trim();
+    if (trimmedTitle.length >= 2) {
+      const escaped = trimmedTitle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const titleRegex = new RegExp(`^#*\\s*${escaped}\\s*\\n+`, "i");
+      prose = prose.replace(titleRegex, "").trim();
+    }
+  }
+
+  return prose;
+}
+
 export function parseCreativeOutput(
   chapterNumber: number,
   content: string,
@@ -36,10 +101,13 @@ export function parseCreativeOutput(
     title = fallbackExtractTitle(content, chapterNumber, countingMode);
   }
 
+  const cleanedTitle = cleanChapterTitle(title, chapterNumber, countingMode);
+  const cleanedContent = cleanChapterProse(chapterContent, cleanedTitle, chapterNumber);
+
   return {
-    title,
-    content: chapterContent,
-    wordCount: countChapterLength(chapterContent, countingMode),
+    title: cleanedTitle,
+    content: cleanedContent,
+    wordCount: countChapterLength(cleanedContent, countingMode),
     preWriteCheck: extract("PRE_WRITE_CHECK"),
   };
 }
@@ -137,11 +205,13 @@ export function parseWriterOutput(
     return match?.[1]?.trim() ?? "";
   };
 
-  const chapterContent = extract("CHAPTER_CONTENT");
+  const rawTitle = extract("CHAPTER_TITLE") || defaultChapterTitle(chapterNumber, countingMode);
+  const title = cleanChapterTitle(rawTitle, chapterNumber, countingMode);
+  const chapterContent = cleanChapterProse(extract("CHAPTER_CONTENT"), title, chapterNumber);
 
   return {
     chapterNumber,
-    title: extract("CHAPTER_TITLE") || defaultChapterTitle(chapterNumber, countingMode),
+    title,
     content: chapterContent,
     wordCount: countChapterLength(chapterContent, countingMode),
     preWriteCheck: extract("PRE_WRITE_CHECK"),

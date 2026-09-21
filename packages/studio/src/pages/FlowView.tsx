@@ -16,6 +16,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { useApi, fetchJson } from "../hooks/use-api";
 import { useColors } from "../hooks/use-colors";
+import { ErrorState, LoadingState } from "../components/ui/states";
 import { tr } from "../lib/app-language";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
@@ -33,21 +34,21 @@ type StoryNode = Node<{ label: string; nodeType: string }, "story">;
 type StoryEdge = Edge;
 
 const TYPE_COLOR: Record<string, string> = {
-  start: "bg-emerald-500/15 border-emerald-500/50",
-  branch: "bg-amber-500/15 border-amber-500/50",
-  ending: "bg-rose-500/15 border-rose-500/50",
-  merge: "bg-sky-500/15 border-sky-500/50",
-  explore: "bg-violet-500/15 border-violet-500/50",
+  start: "bg-success-soft border-success/30",
+  branch: "bg-warning-soft border-warning/35",
+  ending: "bg-block-soft border-destructive/40",
+  merge: "bg-info-soft border-info/30",
+  explore: "bg-primary-soft border-primary/40",
   normal: "bg-muted border-border",
 };
 
 const TYPE_MINIMAP_COLOR: Record<string, string> = {
-  start: "#10b981",
-  branch: "#f59e0b",
-  ending: "#f43f5e",
-  merge: "#0ea5e9",
-  explore: "#8b5cf6",
-  normal: "#6b7280",
+  start: "var(--success)",
+  branch: "var(--warning)",
+  ending: "var(--destructive)",
+  merge: "var(--info)",
+  explore: "var(--primary)",
+  normal: "var(--muted-foreground)",
 };
 
 function StoryFlowNode({ id, data }: NodeProps<StoryNode>) {
@@ -147,7 +148,7 @@ export default function FlowView({
         ...node,
         style: {
           opacity: onPath ? 1 : 0.2,
-          ...(onPath ? { boxShadow: "0 0 0 2px #8b5cf6" } : {}),
+          ...(onPath ? { boxShadow: "0 0 0 2px var(--primary)" } : {}),
         },
       };
     });
@@ -160,8 +161,8 @@ export default function FlowView({
       const onPath = hoveredPath ? hoveredPath.edgeIds.has(edge.id) : false;
       const offPath = hoveredPath !== null && !onPath;
 
-      const baseStroke = isEnding ? "#f59e0b" : "#9ca3af";
-      const stroke = onPath ? "#8b5cf6" : baseStroke;
+      const baseStroke = isEnding ? "var(--warning)" : "var(--border-strong)";
+      const stroke = onPath ? "var(--primary)" : baseStroke;
 
       const rawLabel = typeof edge.label === "string" ? edge.label : "";
       const label = rawLabel.length > 14 ? rawLabel.slice(0, 14) + "…" : rawLabel;
@@ -253,13 +254,8 @@ export default function FlowView({
     );
   };
 
-  if (loading) return <div className={c.muted}>{t("common.loading")}</div>;
-  if (error)
-    return (
-      <div className="text-destructive">
-        {t("common.error")}: {error}
-      </div>
-    );
+  if (loading) return <LoadingState label={t("common.loading")} />;
+  if (error) return <ErrorState title={t("common.error")} message={error} />;
   if (!graph) return null;
 
   return (
@@ -308,15 +304,15 @@ export default function FlowView({
           <span>{tr("死路", "Dead ends")} {stats.deadEnd}</span>
           <span className="ml-auto flex items-center gap-3">
             <span className="flex items-center gap-1">
-              <span style={{ display: "inline-block", width: 20, height: 2, background: "#9ca3af", borderRadius: 1 }} />
+              <span style={{ display: "inline-block", width: 20, height: 2, background: "var(--border-strong)", borderRadius: 1 }} />
               {tr("默认", "Default")}
             </span>
             <span className="flex items-center gap-1">
-              <span style={{ display: "inline-block", width: 20, height: 2, background: "#f59e0b", borderRadius: 1 }} />
+              <span style={{ display: "inline-block", width: 20, height: 2, background: "var(--warning)", borderRadius: 1 }} />
               {tr("结局边", "Ending edge")}
             </span>
             <span className="flex items-center gap-1">
-              <span style={{ display: "inline-block", width: 20, height: 2, background: "#8b5cf6", borderRadius: 1 }} />
+              <span style={{ display: "inline-block", width: 20, height: 2, background: "var(--primary)", borderRadius: 1 }} />
               {tr("悬停路径", "Hover path")}
             </span>
           </span>

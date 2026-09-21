@@ -9,7 +9,7 @@ const badgeVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground [a]:hover:bg-primary/80",
+        default: "bg-primary text-primary-foreground [a]:hover:bg-primary/85",
         secondary:
           "bg-secondary text-secondary-foreground [a]:hover:bg-secondary/80",
         destructive:
@@ -17,8 +17,14 @@ const badgeVariants = cva(
         outline:
           "border-border text-foreground [a]:hover:bg-muted [a]:hover:text-muted-foreground",
         ghost:
-          "hover:bg-muted hover:text-muted-foreground dark:hover:bg-muted/50",
+          "hover:bg-secondary hover:text-foreground",
         link: "text-primary underline-offset-4 hover:underline",
+        /* semantic status tones — reach for these instead of emerald/amber/red */
+        success: "bg-success-soft text-success border-success/25",
+        warning: "bg-warning-soft text-warning border-warning/30",
+        info: "bg-info-soft text-info border-info/25",
+        seal: "bg-seal-soft text-seal border-seal/30",
+        block: "bg-block-soft text-block border-block/30",
       },
     },
     defaultVariants: {

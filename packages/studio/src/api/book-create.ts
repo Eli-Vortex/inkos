@@ -1,4 +1,4 @@
-import { normalizePlatformOrOther, defaultChapterLength, type Platform } from "@actalk/inkos-core";
+import { deriveBookIdFromTitle, normalizePlatformOrOther, defaultChapterLength, type Platform } from "@actalk/inkos-core";
 export { waitForStudioBookReady } from "../lib/book-ready.js";
 export type { StudioBookDetail, WaitForStudioBookReadyOptions } from "../lib/book-ready.js";
 
@@ -31,11 +31,9 @@ export function normalizeStudioPlatform(platform?: string): Platform {
 
 export function buildStudioBookConfig(body: StudioCreateBookBody, now: string): StudioBookConfigDraft {
   return {
-    id: body.title
-      .toLowerCase()
-      .replace(/[^a-z0-9\u4e00-\u9fff]/g, "-")
-      .replace(/-+/g, "-")
-      .slice(0, 30),
+    // Canonical derivation: the previous inline copy skipped the trim and the
+    // leading/trailing-dash strip, so the same title could yield two ids.
+    id: deriveBookIdFromTitle(body.title),
     title: body.title,
     platform: normalizeStudioPlatform(body.platform),
     genre: body.genre,

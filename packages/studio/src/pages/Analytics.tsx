@@ -2,6 +2,7 @@ import { useApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
+import { ErrorState, LoadingState } from "../components/ui/states";
 
 interface AnalyticsData {
   readonly bookId: string;
@@ -20,8 +21,8 @@ export function Analytics({ bookId, nav, theme, t }: { bookId: string; nav: Nav;
   const c = useColors(theme);
   const { data, loading, error } = useApi<AnalyticsData>(`/books/${bookId}/analytics`);
 
-  if (loading) return <div className={c.muted}>{t("common.loading")}</div>;
-  if (error) return <div className="text-red-400">{t("common.error")}: {error}</div>;
+  if (loading) return <LoadingState label={t("common.loading")} />;
+  if (error) return <ErrorState title={t("common.error")} message={error} />;
   if (!data) return null;
 
   const statuses = Object.entries(data.statusDistribution);
@@ -57,7 +58,7 @@ export function Analytics({ bookId, nav, theme, t }: { bookId: string; nav: Nav;
                 </div>
                 <div className={`h-2 ${c.btnSecondary} rounded-full overflow-hidden`}>
                   <div
-                    className="h-full bg-zinc-500 rounded-full transition-all"
+                    className="h-full bg-muted-foreground rounded-full transition-all"
                     style={{ width: `${totalFromDist > 0 ? (count / totalFromDist) * 100 : 0}%` }}
                   />
                 </div>

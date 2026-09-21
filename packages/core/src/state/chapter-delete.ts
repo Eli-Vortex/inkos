@@ -2,6 +2,7 @@ import { access, mkdir, readdir, rename, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { ChapterMeta } from "../models/chapter.js";
 import { toPosixPath } from "../utils/posix-path.js";
+import { purgeChapterDerivedState } from "./chapter-derived-state.js";
 
 export interface ChapterDeleteDeps {
   bookDir(bookId: string): string;
@@ -88,6 +89,10 @@ export async function deleteLatestChapter(
   }
 
   const discarded = await deps.rollbackToChapter(bookId, rollbackTarget);
+  // Chapter numbers are reused, so the removed chapter's findings, plan approval
+  // and version history must go with it — otherwise the next chapter 3 inherits
+  // the previous chapter 3's review verdict and drafts.
+  await purgeChapterDerivedState(bookDir, latest);
   const entry = index.find((chapter) => chapter.number === latest);
 
   return {
@@ -114,3 +119,4 @@ async function pickAvailableName(dir: string, fileName: string): Promise<string>
 async function pathExists(path: string): Promise<boolean> {
   return access(path).then(() => true).catch(() => false);
 }
+

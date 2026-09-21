@@ -6,6 +6,7 @@ import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
 import { deriveActiveBookIds, shouldRefetchBookCollections } from "../hooks/use-book-activity";
+import type { WorkbenchArea } from "../workbench";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
   Plus,
@@ -22,6 +23,7 @@ import {
   Settings,
   Download,
   FileInput,
+  PenLine,
 } from "lucide-react";
 
 interface BookSummary {
@@ -32,6 +34,7 @@ interface BookSummary {
   readonly chaptersWritten: number;
   readonly language?: string;
   readonly fanficMode?: string;
+  readonly updatedAt?: string;
 }
 
 interface Nav {
@@ -40,6 +43,8 @@ interface Nav {
   toAnalytics: (id: string) => void;
   toBookCreate: () => void;
   toServices: () => void;
+  /** Opens the chapter-production workbench at the given area. */
+  toWorkbench: (area: WorkbenchArea, bookId?: string) => void;
 }
 
 function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
@@ -137,6 +142,16 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
   const logEvents = sse.messages.filter((m) => m.event === "log").slice(-8);
   const progressEvent = sse.messages.filter((m) => m.event === "llm:progress").slice(-1)[0];
 
+  // "继续创作" is the primary job of this page: pick the book the author most
+  // recently worked on and offer to drop them straight back into its manuscript.
+  const continueBook = useMemo(() => {
+    const books = [...(data?.books ?? [])];
+    if (books.length === 0) return null;
+    const rank = (book: BookSummary) => book.updatedAt ?? "";
+    books.sort((a, b) => rank(b).localeCompare(rank(a)));
+    return books.find((book) => book.status !== "completed") ?? books[0] ?? null;
+  }, [data]);
+
   useEffect(() => {
     const recent = sse.messages.at(-1);
     if (!recent) return;
@@ -166,12 +181,12 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
         <div className="w-20 h-20 rounded-full bg-primary/5 flex items-center justify-center mb-8">
           <BookOpen size={40} className="text-primary/20" />
         </div>
-        <h2 className="font-serif text-3xl italic text-foreground/80 mb-3">{t("dash.noBooks")}</h2>
+        <h2 className="font-serif text-3xl text-foreground/80 mb-3">{t("dash.noBooks")}</h2>
         <p className="text-sm text-muted-foreground max-w-xs leading-relaxed mb-10">
           {t("dash.createFirst")}
         </p>
         <button
-          onClick={nav.toBookCreate}
+          onClick={() => nav.toBookCreate()}
           className="group flex items-center gap-2 px-8 py-3.5 rounded-xl text-sm font-bold bg-primary text-primary-foreground hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20"
         >
           <Plus size={18} />
@@ -203,13 +218,38 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
           <p className="text-sm text-muted-foreground">{t("dash.subtitle")}</p>
         </div>
         <button
-          onClick={nav.toBookCreate}
+          onClick={() => nav.toBookCreate()}
           className="group flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold bg-primary text-primary-foreground hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20"
         >
           <Plus size={16} />
           {t("nav.newBook")}
         </button>
       </div>
+
+      {continueBook && (
+        <section className="rounded-2xl border border-border/60 bg-card p-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <div className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">继续创作</div>
+            <button
+              onClick={() => nav.toWorkbench("writing", continueBook.id)}
+              className="font-serif text-2xl hover:text-primary transition-colors text-left truncate block font-medium mt-1.5 hover:underline underline-offset-4 decoration-primary/30"
+            >
+              {continueBook.title}
+            </button>
+            <div className="text-[13px] text-muted-foreground mt-1.5">
+              {continueBook.genre} · {continueBook.chaptersWritten} {t("dash.chapters")}
+            </div>
+          </div>
+          <button
+            onClick={() => nav.toWorkbench("writing", continueBook.id)}
+            className="flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold bg-primary text-primary-foreground hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20 shrink-0"
+          >
+            <PenLine size={16} />
+            进入写作工作区
+          </button>
+        </section>
+      )}
+
 
       <div className="grid gap-6">
         {data.books.map((book, index) => {
@@ -244,8 +284,8 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
                     </div>
                     <div className="flex items-center gap-1.5">
                       <div className={`w-2 h-2 rounded-full ${
-                        book.status === "active" ? "bg-emerald-500" :
-                        book.status === "paused" ? "bg-amber-500" :
+                        book.status === "active" ? "bg-success" :
+                        book.status === "paused" ? "bg-warning" :
                         "bg-muted-foreground"
                       }`} />
                       <span>{
@@ -261,7 +301,7 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
                       <span className="px-1.5 py-0.5 rounded border border-primary/20 text-primary text-[10px] font-bold">EN</span>
                     )}
                     {book.fanficMode && (
-                      <span className="flex items-center gap-1 text-purple-500">
+                      <span className="flex items-center gap-1 text-primary">
                         <Zap size={12} />
                         <span className="italic">{book.fanficMode}</span>
                       </span>
@@ -374,3 +414,4 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
     </div>
   );
 }
+

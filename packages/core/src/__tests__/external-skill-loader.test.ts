@@ -12,21 +12,21 @@ import {
 } from "../skills/index.js";
 
 const BUILTIN_SKILL_IDS = [
-  "inkos-interactive-film",
-  "inkos-long-market-research",
-  "inkos-long-story-analysis",
-  "inkos-long-writing",
-  "inkos-play-world",
-  "inkos-script-writing",
-  "inkos-short-market-research",
-  "inkos-short-story-analysis",
-  "inkos-short-writing",
-  "inkos-story-cover",
-  "inkos-story-deslop",
-  "inkos-story-import",
-  "inkos-story-review",
-  "inkos-storyboard",
-  "inkos-translation",
+  "novel-creation-interactive-film",
+  "novel-creation-long-market-research",
+  "novel-creation-long-story-analysis",
+  "novel-creation-long-writing",
+  "novel-creation-play-world",
+  "novel-creation-script-writing",
+  "novel-creation-short-market-research",
+  "novel-creation-short-story-analysis",
+  "novel-creation-short-writing",
+  "novel-creation-story-cover",
+  "novel-creation-story-deslop",
+  "novel-creation-story-import",
+  "novel-creation-story-review",
+  "novel-creation-storyboard",
+  "novel-creation-translation",
 ] as const;
 
 describe("external skill loader", () => {
@@ -47,23 +47,23 @@ describe("external skill loader", () => {
     expect(loaded.skills.map((skill) => skill.id)).toEqual(BUILTIN_SKILL_IDS);
     expect(loaded.skills).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        id: "inkos-long-writing",
+        id: "novel-creation-long-writing",
         source: "builtin",
         body: expect.stringContaining("objective, resistance"),
-        baseDir: expect.stringMatching(/skills[\\/]inkos-long-writing$/),
+        baseDir: expect.stringMatching(/skills[\\/]novel-creation-long-writing$/),
       }),
       expect.objectContaining({
-        id: "inkos-story-review",
+        id: "novel-creation-story-review",
         source: "builtin",
         body: expect.stringContaining("parser or model-format failure"),
       }),
       expect.objectContaining({
-        id: "inkos-play-world",
+        id: "novel-creation-play-world",
         source: "builtin",
         body: expect.stringContaining("world contract as authority"),
       }),
       expect.objectContaining({
-        id: "inkos-interactive-film",
+        id: "novel-creation-interactive-film",
         source: "builtin",
         body: expect.stringContaining("Variables and flags serve story causality"),
       }),
@@ -71,13 +71,13 @@ describe("external skill loader", () => {
   });
 
   it("lets a project skill replace a built-in skill with the same id", async () => {
-    const skillDir = join(root, ".agents", "skills", "inkos-story-review");
+    const skillDir = join(root, ".agents", "skills", "novel-creation-story-review");
     await mkdir(skillDir, { recursive: true });
     await writeFile(
       join(skillDir, "SKILL.md"),
       [
         "---",
-        "name: inkos-story-review",
+        "name: novel-creation-story-review",
         "description: Project-specific review standard.",
         "---",
         "Use the project's own review standard.",
@@ -92,7 +92,7 @@ describe("external skill loader", () => {
     });
     const registry = createSkillRegistry({ skills: loaded.skills });
 
-    expect(registry.getSkill("inkos-story-review")).toMatchObject({
+    expect(registry.getSkill("novel-creation-story-review")).toMatchObject({
       source: "project",
       body: "Use the project's own review standard.",
       baseDir: skillDir,
@@ -150,7 +150,7 @@ describe("external skill loader", () => {
     expect(result.skills[0]).not.toHaveProperty("contextNeeds");
   });
 
-  it("loads an AgentSkills/OpenClaw manifest without InkOS-only fields", async () => {
+  it("loads an AgentSkills/OpenClaw manifest without Novel Creation-only fields", async () => {
     const skillDir = join(root, "writer-distillation");
     await mkdir(skillDir, { recursive: true });
     await writeFile(
@@ -298,7 +298,7 @@ describe("external skill loader", () => {
     }));
   });
 
-  it("does not discover the removed InkOS-specific skill directory", async () => {
+  it("does not discover the removed Novel Creation-specific skill directory", async () => {
     const skillDir = join(root, ".inkos", "skills", "legacy-skill");
     await mkdir(skillDir, { recursive: true });
     await writeFile(

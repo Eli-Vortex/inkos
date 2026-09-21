@@ -1,0 +1,69 @@
+/*
+  Novel Creation — workbench token layer.  「墨与印 / Ink & Seal」
+
+  This file used to own the palette. It no longer does: src/index.css is the
+  single source of truth for the whole Studio, and it already publishes the
+  `--nc-*` names this module uses (grounds, ink, accents, status family,
+  elevation, type scale, radii, motion, grain).
+
+  So nothing is re-declared here. What remains is only what is genuinely
+  workbench-local:
+
+    · the fonts the authoring surfaces read by their own names;
+    · the 4/8 spacing steps and the radius aliases;
+    · the frosted-surface mixes derived from the global surfaces;
+    · the writing-canvas metrics (prose column, tree, review rail, topbar);
+    · the craft layer the workbench adds on top (rings, grain blend).
+
+  No colour literal appears below — every value is a `var()` reference.
+*/
+
+.nc-root {
+  /* ── fonts (aliases onto the global families) ─────────────────────────── */
+  --nc-font-display: var(--font-serif);
+  --nc-font-ui: var(--font-sans);
+  --nc-font-prose: 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', Georgia, serif;
+  --nc-font-mono: var(--font-mono);
+
+  /* ── spacing (4/8 rhythm) ────────────────────────────────────────────── */
+  --nc-s1: 4px;
+  --nc-s2: 8px;
+  --nc-s3: 12px;
+  --nc-s4: 16px;
+  --nc-s5: 20px;
+  --nc-s6: 24px;
+  --nc-s8: 32px;
+  --nc-s10: 40px;
+  --nc-s12: 48px;
+  --nc-s16: 64px;
+
+  /* ── crafted surfaces derived from the global ones ───────────────────── */
+  --nc-glass: color-mix(in srgb, var(--nc-card) 72%, transparent);
+  --nc-glass-panel: color-mix(in srgb, var(--nc-panel) 68%, transparent);
+  --nc-glass-blur: 12px;
+  --nc-hairline: color-mix(in srgb, var(--nc-border) 70%, transparent);
+
+  --nc-primary-ring: color-mix(in srgb, var(--nc-primary) 28%, transparent);
+  --nc-seal-ring: color-mix(in srgb, var(--nc-seal) 30%, transparent);
+
+  /* ── writing canvas ──────────────────────────────────────────────────── */
+  --nc-prose-w: 780px;
+  --nc-prose-size: 17.5px;
+  --nc-prose-lh: 1.8;
+  --nc-prose-gap: 1.05em;
+
+  /* ── workbench-only layout metrics ───────────────────────────────────── */
+  --nc-nav-w: 232px;
+  --nc-nav-w-collapsed: 64px;
+  --nc-tree-w: 276px;
+  --nc-review-w: 360px;
+  --nc-topbar-h: 56px;
+}
+
+/* The dark ground already changes the global palette; the workbench only needs
+   its own glass and grain values to follow. */
+.dark .nc-root {
+  --nc-glass-blur: 14px;
+  --nc-grain-opacity: 0.02;
+  --nc-grain-blend: overlay;
+}

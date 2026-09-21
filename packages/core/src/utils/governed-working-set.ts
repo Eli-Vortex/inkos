@@ -1,4 +1,5 @@
 import type { ContextPackage } from "../models/input-governance.js";
+import { escapeRegExp } from "./escape-regexp.js";
 import {
   parsePendingHooksMarkdown,
   renderHookSnapshot,
@@ -390,6 +391,3 @@ function containsCjk(value: string): boolean {
   return /[\u4e00-\u9fff]/.test(value);
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}

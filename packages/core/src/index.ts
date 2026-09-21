@@ -1,6 +1,75 @@
+export {
+  DeslopLinter,
+  type DeslopFinding,
+  type DeslopReport,
+} from "./pipeline/deslop-linter.js";
+export {
+  PacingDebtEngine,
+  type EmotionalDebtRecord,
+  type DebtStatus,
+  type PacingState,
+} from "./pipeline/pacing-debt-engine.js";
+
 // Models
 export { type BookConfig, type Platform, type Genre, type BookStatus, type FanficMode, type ChapterReviewMode, type RevisionGate, BookConfigSchema, PlatformSchema, GenreSchema, BookStatusSchema, FanficModeSchema, normalizePlatformId, normalizePlatformOrOther, resolveChapterReviewMode, resolveRevisionGate } from "./models/book.js";
 export { type ChapterMeta, type ChapterStatus, ChapterMetaSchema, ChapterStatusSchema } from "./models/chapter.js";
+export {
+  FINDING_SOURCES,
+  FindingSourceSchema,
+  FindingSeveritySchema,
+  FindingScopeSchema,
+  FindingStatusSchema,
+  FindingEvidenceSchema,
+  FindingWaiverSchema,
+  FindingSchema,
+  defaultBlockingPolicy,
+  defaultWaivablePolicy,
+  blockingFindings,
+  unverifiedFindings,
+  waiverBasisHash,
+  isExpiredWaiver,
+  LEGACY_POLICY_VERSION,
+  parseLegacySeverity,
+  parseLegacyMessage,
+  findingId,
+  auditIssueToFinding,
+  projectLegacyFindings,
+  isWaivable,
+  projectChapterFindings,
+  countBlockingFindings,
+  countUnverifiedFindings,
+} from "./findings/index.js";
+export type {
+  Finding,
+  FindingSource,
+  FindingSeverity,
+  FindingScope,
+  FindingStatus,
+  FindingEvidence,
+  FindingWaiver,
+  FindingContext,
+  FindingProducer,
+  LegacyAuditSource,
+} from "./findings/index.js";
+export {
+  decideRevisionGate,
+  REVISION_GATE_STANDARDS,
+} from "./pipeline/revision-gate.js";
+export type {
+  RevisionAuditCounts,
+  RevisionGateDecision,
+} from "./pipeline/revision-gate.js";
+export {
+  CHAPTER_GATE_POLICY_VERSION,
+  GATE_RULES,
+  evaluateChapterGate,
+  validateChapterGate,
+  isGateFindingWaivable,
+} from "./pipeline/chapter-gate.js";
+export type {
+  ChapterGateInput,
+  ChapterGateResult,
+} from "./pipeline/chapter-gate.js";
 export { type ProjectConfig, type LLMConfig, type NotifyChannel, type DetectionConfig, type QualityGates, type FoundationConfig, type WritingConfig, type AgentLLMOverride, type ResearchSearchConfig, ProjectConfigSchema, LLMConfigSchema, AgentLLMOverrideSchema, DetectionConfigSchema, QualityGatesSchema, FoundationConfigSchema, WritingConfigSchema, ResearchSearchConfigSchema } from "./models/project.js";
 export { type CurrentState, type ParticleLedger, type PendingHooks, type PendingHook, type LedgerEntry } from "./models/state.js";
 export { type GenreProfile, type ParsedGenreProfile, GenreProfileSchema, parseGenreProfile } from "./models/genre-profile.js";
@@ -341,6 +410,7 @@ export {
   nextTranscriptSeq,
   transcriptPath,
   legacyBookSessionPath,
+  truncateTranscriptTurns,
 } from "./interaction/session-transcript.js";
 export {
   cleanRestoredAgentMessages,
@@ -550,6 +620,94 @@ export { ConsolidatorAgent } from "./agents/consolidator.js";
 export { MemoryDB, type Fact, type StoredSummary } from "./state/memory-db.js";
 export { StateValidatorAgent } from "./agents/state-validator.js";
 export { loadRuntimeStateSnapshot, buildRuntimeStateArtifacts, saveRuntimeStateSnapshot, loadNarrativeMemorySeed, loadSnapshotCurrentStateFacts, type RuntimeStateArtifacts, type NarrativeMemorySeed } from "./state/runtime-state-store.js";
+export {
+  loadHookDiagnosticsHistory,
+  recordHookDiagnostics,
+  staleRunLength,
+  HOOK_DIAGNOSTICS_POLICY_VERSION,
+} from "./state/hook-diagnostics-store.js";
+export type {
+  HookDiagnosticSnapshot,
+  HookDiagnosticsHistory,
+} from "./state/hook-diagnostics-store.js";
+export { hookEvidence, hasEvidenceTrail } from "./utils/hook-lifecycle.js";
+export type { HookEvidenceEntry, HookEvidenceKind } from "./utils/hook-lifecycle.js";
+export {
+  ChapterFindingsFileSchema,
+  loadChapterFindings,
+  saveChapterFindings,
+  readChapterFindings,
+  waiveChapterFinding,
+  isWaiverStale,
+} from "./state/chapter-findings-store.js";
+export type {
+  ChapterFindingsFile,
+  WaiveResult,
+} from "./state/chapter-findings-store.js";
+export {
+  EXTERNAL_PROBE_POLICY_VERSION,
+  runExternalFindingProbe,
+  externalProbeProducer,
+  externalFinding,
+  mapExternalSeverity,
+} from "./findings/producers/external-probe.js";
+export type {
+  ExternalProbeSpec,
+  ExternalProbeOutcome,
+  ExternalProbeFailure,
+} from "./findings/producers/external-probe.js";
+export { deslopFindings, deslopProducer, DESLOP_POLICY_VERSION } from "./findings/producers/deslop.js";
+export {
+  auditIssuesToFindings,
+  auditIssuesToLegacySummary,
+  findingsToLegacySummary,
+  CONTINUITY_POLICY_VERSION,
+} from "./findings/producers/continuity.js";
+export {
+  FindingProducerRegistry,
+  ProducerRegistrationError,
+  findSkillIdConflicts,
+  assertNoSkillIdConflicts,
+} from "./findings/registry.js";
+export type { SkillIdConflict } from "./findings/registry.js";
+export {
+  COMMIT_POLICY_VERSION,
+  CommitReceiptSchema,
+  commitChapter,
+  findCommitReceipt,
+  isStaleAuditStatus,
+} from "./pipeline/chapter-commit.js";
+export type {
+  CommitReceipt,
+  CommitDeps,
+  CommitRequest,
+  CommitResult,
+  CommitFailure,
+  CommitFailureCode,
+} from "./pipeline/chapter-commit.js";
+export {
+  buildChapterFileLookup,
+  findChapterFile,
+  padChapter,
+  parseChapterFileNumber,
+  readChapterContent,
+  readChapterRevision,
+  selectChapterFile,
+} from "./state/chapter-workspace.js";
+export type { ChapterRevisionInfo } from "./state/chapter-workspace.js";
+export {
+  PLAN_APPROVAL_POLICY_VERSION,
+  loadPlanApproval,
+  readPlanHash,
+  readPlanRevisionState,
+  approvePlan,
+} from "./state/plan-approval-store.js";
+export type {
+  PlanApproval,
+  PlanRevisionState,
+  ApprovePlanResult,
+} from "./state/plan-approval-store.js";
+export { stableHash, contentHash } from "./utils/stable-hash.js";
 export { splitChapters, type SplitChapter } from "./utils/chapter-splitter.js";
 export * from "./translation/index.js";
 export { countChapterLength, resolveLengthCountingMode, formatLengthCount, buildLengthSpec, defaultChapterLength, DEFAULT_CHAPTER_LENGTH_ZH, DEFAULT_CHAPTER_LENGTH_EN, isOutsideSoftRange, isOutsideHardRange, type LengthLanguage } from "./utils/length-metrics.js";
@@ -738,4 +896,15 @@ export {
 export { exportInk } from "./interactive-film/export-ink.js";
 export { buildPlayableHtml } from "./interactive-film/export-html.js";
 export { ingestMaterial, type IngestMaterialInput, type MaterialAsset } from "./materials/ingest.js";
+export {
+  listBookMaterials,
+  readBookMaterial,
+  saveBookMaterial,
+  bookMaterialsDir,
+  bookMaterialPath,
+  type BookMaterialEntry,
+  type BookMaterialFacet,
+} from "./materials/book-materials.js";
 export { runWorkerAgent, type WorkerAgentOptions } from "./agent/worker-agent.js";
+
+

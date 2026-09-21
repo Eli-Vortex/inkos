@@ -115,7 +115,7 @@ export function TruthFiles({ bookId, nav, theme, t }: { bookId: string; nav: Nav
 
       <div className="grid grid-cols-[240px_1fr] gap-6">
         {/* File list */}
-        <div className={`border ${c.cardStatic} rounded-lg overflow-hidden`}>
+        <div className={`border ${c.cardStatic} rounded-lg overflow-hidden max-h-[560px] overflow-y-auto`}>
           {data?.files.map((f) => (
             <button
               key={f.name}
@@ -136,13 +136,13 @@ export function TruthFiles({ bookId, nav, theme, t }: { bookId: string; nav: Nav
         </div>
 
         {/* Content viewer */}
-        <div className={`border ${c.cardStatic} rounded-lg p-5 min-h-[400px] flex flex-col`}>
+        <div className={`border ${c.cardStatic} rounded-lg p-5 min-h-[400px] max-h-[560px] overflow-y-auto flex flex-col`}>
           {selected && fileData?.content != null ? (
             <>
               {isLegacyShim && (
                 <div
                   data-testid="legacy-shim-warning"
-                  className="mb-3 px-3 py-2 rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 text-xs leading-relaxed"
+                  className="mb-3 px-3 py-2 rounded-md border border-warning/35 bg-warning-soft text-warning dark:text-warning text-xs leading-relaxed"
                 >
                   <div className="font-medium">兼容层只读 / Read-only compat shim</div>
                   <div className="mt-1">
@@ -156,7 +156,7 @@ export function TruthFiles({ bookId, nav, theme, t }: { bookId: string; nav: Nav
               {isRuntimeDiagnostic && (
                 <div
                   data-testid="runtime-diagnostic-warning"
-                  className="mb-3 px-3 py-2 rounded-md border border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300 text-xs leading-relaxed"
+                  className="mb-3 px-3 py-2 rounded-md border border-info/30 bg-info-soft text-info dark:text-info text-xs leading-relaxed"
                 >
                   <div className="font-medium">运行时诊断文件 / Runtime diagnostic</div>
                   <div className="mt-1">

@@ -542,7 +542,7 @@ describe("CLI integration", () => {
   describe("inkos doctor", () => {
     it("checks environment health", () => {
       const { stdout } = runStderr(["doctor"]);
-      expect(stdout).toContain("InkOS Doctor");
+      expect(stdout).toContain("Novel Creation Doctor");
       expect(stdout).toContain("Node.js >= 22");
       expect(stdout).toContain("inkos.json");
     });

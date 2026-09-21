@@ -13,6 +13,7 @@ import {
   type EditRequest,
 } from "../interaction/edit-controller.js";
 import { listChapterVersions, readChapterVersion } from "../state/chapter-workspace.js";
+import { loadChapterFindings } from "../state/chapter-findings-store.js";
 
 let projectRoot: string;
 
@@ -76,6 +77,26 @@ describe("edit controller", () => {
     expect(result.transactionType).toBe("chapter-replace");
     expect(result.affectedScope).toBe("chapter");
     expect(result.requiresTruthRebuild).toBe(true);
+  });
+
+  it("clears a chapter when the replacement text is empty", async () => {
+    const bookDir = join(projectRoot, "books", "harbor");
+    const chapterPath = join(bookDir, "chapters", "0009_待清空.md");
+    await writeFile(chapterPath, "# 第9章 待清空\n\n旧正文内容。", "utf-8");
+
+    const result = await executeEditTransaction(
+      {
+        bookDir: (bookId) => join(projectRoot, "books", bookId),
+        loadChapterIndex: async () => [],
+        saveChapterIndex: async () => undefined,
+      },
+      { kind: "chapter-replace", bookId: "harbor", chapterNumber: 9, fullText: "" },
+    );
+
+    expect(result.transactionType).toBe("chapter-replace");
+    expect((await readFile(chapterPath, "utf-8")).trim()).toBe("");
+    // The cleared text stays recoverable in history.
+    expect((await listChapterVersions(bookDir, 9)).length).toBeGreaterThan(0);
   });
 
   it("plans local text edits without forcing full-book rebuild", () => {
@@ -142,8 +163,38 @@ describe("edit controller", () => {
     expect(result.touchedFiles.length).toBeGreaterThan(0);
   });
 
-  it("does not rewrite trashed chapters during entity rename", async () => {
-    const bookDir = join(projectRoot, "books", "trashbook");
+  it("creates the prose file when writing a chapter that was only planned", async () => {
+    const bookDir = join(projectRoot, "books", "planned");
+    await mkdir(join(bookDir, "chapters"), { recursive: true });
+
+    let savedIndex: ChapterMeta[] = [];
+    const result = await executeEditTransaction(
+      {
+        bookDir: (bookId) => join(projectRoot, "books", bookId),
+        loadChapterIndex: async () => [],
+        saveChapterIndex: async (_bookId, index) => { savedIndex = [...index]; },
+      },
+      {
+        kind: "chapter-replace",
+        bookId: "planned",
+        chapterNumber: 1,
+        fullText: "第一段正文。",
+        versionSource: "manual",
+      },
+    );
+
+    // Planning a chapter then writing it is the documented order, so the write
+    // must create the file rather than fail on "chapter not found".
+    await expect(readFile(join(bookDir, "chapters", "0001_chapter.md"), "utf-8"))
+      .resolves.toContain("第一段正文。");
+    expect(result.reviewRequired).toBe(true);
+    expect(result.touchedFiles.some((file) => file.endsWith("0001_chapter.md"))).toBe(true);
+    // Nothing to archive on a first write, so no version is fabricated.
+    await expect(listChapterVersions(bookDir, 1)).resolves.toEqual([]);
+    expect(savedIndex[0]?.status).toBe("audit-failed");
+  });
+
+  it("does not rewrite trashed chapters during entity rename", async () => {    const bookDir = join(projectRoot, "books", "trashbook");
     await mkdir(join(bookDir, "story"), { recursive: true });
     await mkdir(join(bookDir, "chapters", ".trash"), { recursive: true });
     await writeFile(join(bookDir, "story", "story_bible.md"), "主角陆尘住在港口。", "utf-8");
@@ -312,6 +363,16 @@ describe("edit controller", () => {
     expect(savedIndex[0]?.status).toBe("audit-failed");
     expect(savedIndex[0]?.auditIssues.at(-1)).toContain("Manual text edit requires review");
     expect(result.reviewRequired).toBe(true);
+
+    // The note must also exist as a finding. Previously only the index string was
+    // written, so the finding store kept pre-edit audit results and the review
+    // view never showed why the chapter needed re-review.
+    const stored = await loadChapterFindings(bookDir, 3);
+    const manual = stored?.findings.find((finding) => finding.rule === "state.manual-local-edit");
+    expect(manual).toBeDefined();
+    expect(manual?.severity).toBe("warning");
+    // A manual edit is a "needs review" note, not a hard stop.
+    expect(manual?.blocking).toBe(false);
   });
 
   it("updates the index word count when patching chapter text", async () => {
@@ -465,3 +526,4 @@ describe("edit controller", () => {
     )).rejects.toThrow(/not a directory|ENOTDIR/i);
   });
 });
+

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  listStudioTaskSessionIds,
   loadStudioTaskSnapshot,
   saveStudioTaskSnapshot,
   studioTaskSnapshotPath,
@@ -97,5 +98,15 @@ describe("Studio task snapshots", () => {
 
     await expect(loadStudioTaskSnapshot(root, "session-3")).resolves.toBeNull();
     await expect(readFile(path, "utf-8")).resolves.toBe("{broken");
+  });
+
+  it("lists valid task sessions even when another filename is malformed", async () => {
+    const tasksDir = join(root, ".inkos", "tasks");
+    await mkdir(tasksDir, { recursive: true });
+    // A stray `%` makes decodeURIComponent throw; it must not blank the listing.
+    await writeFile(join(tasksDir, "%ZZ.json"), "{}", "utf-8");
+    await writeFile(join(tasksDir, "session-9.json"), "{}", "utf-8");
+
+    await expect(listStudioTaskSessionIds(root)).resolves.toEqual(["session-9"]);
   });
 });

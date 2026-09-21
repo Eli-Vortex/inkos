@@ -1,6 +1,6 @@
-import { AsyncLocalStorage } from "node:async_hooks";
+﻿import { AsyncLocalStorage } from "node:async_hooks";
 import type { LLMClient, OnStreamProgress } from "../llm/provider.js";
-import { createLLMClient } from "../llm/provider.js";
+import { createLLMClient, isOutputLimitError } from "../llm/provider.js";
 import { runWorkerAgent } from "../agent/worker-agent.js";
 import type { Logger } from "../utils/logger.js";
 import type { BookConfig, FanficMode, RevisionGate } from "../models/book.js";
@@ -25,7 +25,9 @@ import { readGenreProfile } from "../agents/rules-reader.js";
 import { analyzeAITells } from "../agents/ai-tells.js";
 import { analyzeSensitiveWords } from "../agents/sensitive-words.js";
 import { StateManager } from "../state/manager.js";
-import { archiveChapterVersion, readChapterUserBrief } from "../state/chapter-workspace.js";
+import { archiveChapterVersion, findChapterFile, readChapterUserBrief } from "../state/chapter-workspace.js";
+import { saveChapterFindings } from "../state/chapter-findings-store.js";
+import { auditIssuesToFindings, findingsToLegacySummary } from "../findings/producers/continuity.js";
 import { MemoryDB, type Fact } from "../state/memory-db.js";
 import { dispatchNotification, dispatchWebhookEvent } from "../notify/dispatcher.js";
 import type { WebhookEvent } from "../notify/webhook.js";
@@ -55,11 +57,13 @@ import {
   retrySettlementAfterValidationFailure,
 } from "./chapter-state-recovery.js";
 import { persistChapterArtifacts } from "./chapter-persistence.js";
+import { decideRevisionGate, REVISION_GATE_STANDARDS } from "./revision-gate.js";
 import { runChapterReviewCycle } from "./chapter-review-cycle.js";
 import { validateChapterTruthPersistence } from "./chapter-truth-validation.js";
 import { loadPersistedPlan, relativeToBookDir, savePersistedPlan } from "./persisted-governed-plan.js";
 import { selectBookReferenceContext } from "../references/reference-context.js";
 import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
+import { activatedSkillIds, mergeActivatedSkillGuidance } from "../skills/production-bindings.js";
 import { commitAtomicFileSet } from "../utils/atomic-file-set.js";
 import { toPosixPath } from "../utils/posix-path.js";
 import {
@@ -229,13 +233,6 @@ export function buildImportFoundationSource(
   ].join("\n");
 }
 
-/** Human-readable description of each manual-revision gate, surfaced in revisionDiagnostics. */
-const REVISION_GATE_STANDARDS: Record<RevisionGate, string> = {
-  strict: "A revision is applied only when blocking, critical, and AI-tell counts do not worsen, and at least blocking or AI-tell issues improve.",
-  lenient: "A revision is applied whenever blocking, critical, and AI-tell counts do not worsen; no improvement is required (lenient gate).",
-  always: "Manual revisions are always applied; audit counts are recorded for reference only (always gate).",
-};
-
 export interface PipelineConfig {
   readonly client: LLMClient;
   readonly model: string;
@@ -257,6 +254,12 @@ export interface PipelineConfig {
    * - "always": always apply; audit counts are recorded but never block.
    */
   readonly revisionGate?: RevisionGate;
+  /**
+   * Explicit "force overwrite" for manual revisions: when the derived truth
+   * state fails validation, still persist the rewritten chapter (keeping the
+   * existing truth files) instead of keeping the original. Off by default.
+   */
+  readonly forceApply?: boolean;
   readonly notifyChannels?: ReadonlyArray<NotifyChannel>;
   readonly radarSources?: ReadonlyArray<RadarSource>;
   readonly externalContext?: string;
@@ -496,6 +499,15 @@ export class PipelineRunner {
       return await this.resolveBookLanguage(book);
     } catch {
       return "zh";
+    }
+  }
+
+  /** Read-only genre lookup for session prompt selection. */
+  async getBookGenre(bookId: string): Promise<string | undefined> {
+    try {
+      return (await this.state.loadBookConfig(bookId)).genre;
+    } catch {
+      return undefined;
     }
   }
 
@@ -1250,6 +1262,12 @@ export class PipelineRunner {
       { reuseExistingIntentWhenContextMissing: false },
     );
 
+    // A planned chapter has to appear in the index, or planning is invisible: the
+    // chapter tree lists nothing, "new chapter" looks broken, and there is no
+    // index entry for the prose to be written into. `card-generated` exists in the
+    // schema for exactly this stage and was previously never written by anything.
+    await this.upsertPlannedChapterEntry(bookId, chapterNumber);
+
     return {
       bookId,
       chapterNumber,
@@ -1257,6 +1275,33 @@ export class PipelineRunner {
       goal: plan.intent.goal,
       conflicts: [],
     };
+  }
+
+  /**
+   * Record a planned chapter in the index as `card-generated`.
+   *
+   * The title is a placeholder: the real one arrives with the prose, and
+   * chapter-persistence overwrites both title and status at that point. An
+   * existing entry is left alone so planning never downgrades a chapter that
+   * already has prose.
+   */
+  private async upsertPlannedChapterEntry(bookId: string, chapterNumber: number): Promise<void> {
+    const index = await this.state.loadChapterIndex(bookId);
+    if (index.some((chapter) => chapter.number === chapterNumber)) return;
+
+    const now = new Date().toISOString();
+    const entry = {
+      number: chapterNumber,
+      title: `第${chapterNumber}章`,
+      status: "card-generated" as const,
+      wordCount: 0,
+      createdAt: now,
+      updatedAt: now,
+      auditIssues: [],
+      lengthWarnings: [],
+    };
+    const next = [...index, entry].sort((left, right) => left.number - right.number);
+    await this.state.saveChapterIndex(bookId, next);
   }
 
   async composeChapter(bookId: string, context?: string): Promise<ComposeChapterResult> {
@@ -1313,6 +1358,10 @@ export class PipelineRunner {
     });
     const result = evaluation.auditResult;
 
+    // Persist structured findings first, then derive the index summary from them,
+    // so the findings store (which the commit gate reads) and the index agree.
+    const auditIssues = await this.persistAuditFindings(bookDir, targetChapter, result.issues);
+
     // Update index with audit result
     const index = await this.state.loadChapterIndex(bookId);
     const updated = index.map((ch) =>
@@ -1321,7 +1370,7 @@ export class PipelineRunner {
             ...ch,
             status: (result.passed ? "ready-for-review" : "audit-failed") as ChapterMeta["status"],
             updatedAt: new Date().toISOString(),
-            auditIssues: result.issues.map((i) => `[${i.severity}] ${i.description}`),
+            auditIssues: [...auditIssues],
           }
         : ch,
     );
@@ -1450,7 +1499,7 @@ export class PipelineRunner {
         zh: `修订第${targetChapter}章`,
         en: `revising chapter ${targetChapter}`,
       });
-      const reviseOutput = await reviser.reviseChapter(
+      const runReviser = () => reviser.reviseChapter(
         bookDir,
         content,
         targetChapter,
@@ -1469,6 +1518,51 @@ export class PipelineRunner {
             }
           : { lengthSpec, baselineChapter },
       );
+      let reviseOutput: Awaited<ReturnType<typeof runReviser>>;
+      try {
+        reviseOutput = await runReviser();
+      } catch (error) {
+        if (!isOutputLimitError(error)) throw error;
+        this.logWarn(stageLanguage, {
+          zh: "修订输出触及模型长度上限，正在重试一次...",
+          en: "Revision hit the model output limit; retrying once...",
+        });
+        try {
+          reviseOutput = await runReviser();
+        } catch (retryError) {
+          if (!isOutputLimitError(retryError)) throw retryError;
+          // A runaway/two-strikes rewrite must not be written back half-finished.
+          // Keep the original chapter so the task completes safely.
+          this.logWarn(stageLanguage, {
+            zh: "修订再次触及长度上限，已保留原章节（本次未改动）。",
+            en: "Revision hit the output limit again; keeping the original chapter unchanged.",
+          });
+          return {
+            chapterNumber: targetChapter,
+            wordCount: countChapterLength(content, countingMode),
+            fixedIssues: [],
+            applied: false,
+            status: "unchanged",
+            auditPassed: false,
+            auditIssues: preRevision.auditResult.issues,
+            skippedReason: "模型输出触及长度上限，修订未完成，已保留原章节。可重试或改用输出上限更高的模型。",
+            revisionDiagnostics: {
+              standard: "A revision must be produced in full before it replaces the chapter.",
+              before: {
+                blockingCount: preRevision.blockingCount,
+                criticalCount: preRevision.criticalCount,
+                aiTellCount: preRevision.aiTellCount,
+              },
+              after: {
+                blockingCount: preRevision.blockingCount,
+                criticalCount: preRevision.criticalCount,
+                aiTellCount: preRevision.aiTellCount,
+              },
+              remainingIssues: preRevision.auditResult.issues,
+            },
+          };
+        }
+      }
 
       if (reviseOutput.revisedContent.length === 0) {
         throw new Error("Reviser returned empty content");
@@ -1521,6 +1615,64 @@ export class PipelineRunner {
           logger: this.config.logger,
         });
         if (recovery.kind === "degraded") {
+          // Force mode (UI「强制覆盖」): the rewritten chapter was produced, so
+          // persist it even though the derived truth state did not validate.
+          // Truth files are left as-is — run 同步/resync to reconcile them.
+          if (this.config.forceApply) {
+            const forceExistingFile = await findChapterFile(bookDir, targetChapter);
+            if (!forceExistingFile) {
+              throw new Error(`Chapter ${targetChapter} file not found in chapters dir`);
+            }
+            await archiveChapterVersion(bookDir, targetChapter, content, "revision");
+            const forceLang = book.language ?? gp.language;
+            const forceHeading = forceLang === "en"
+              ? `# Chapter ${targetChapter}: ${chapterMeta.title}`
+              : `# 第${targetChapter}章 ${chapterMeta.title}`;
+            await commitAtomicFileSet({
+              rootDir: bookDir,
+              writes: [{
+                relativePath: join("chapters", forceExistingFile),
+                content: `${forceHeading}\n\n${revisedContent}`,
+              }],
+            });
+            const forcedIndex = index.map((ch) => ch.number === targetChapter
+              ? {
+                  ...ch,
+                  status: "ready-for-review" as ChapterMeta["status"],
+                  wordCount: revisedCount,
+                  updatedAt: new Date().toISOString(),
+                }
+              : ch);
+            await this.state.saveChapterIndex(bookId, forcedIndex);
+            this.logWarn(stageLanguage, {
+              zh: "已强制覆盖修订稿；状态校验未通过，设定/伏笔请随后用「同步」校正。",
+              en: "Force-applied the revision; state validation failed, reconcile truth files via resync.",
+            });
+            return {
+              chapterNumber: targetChapter,
+              wordCount: revisedCount,
+              fixedIssues: reviseOutput.fixedIssues,
+              applied: true,
+              status: "ready-for-review",
+              auditPassed: false,
+              auditIssues: recovery.issues,
+              skippedReason: "已强制覆盖：状态校验未通过，但修订稿已写入。建议随后执行“同步”以校正设定与伏笔。",
+              revisionDiagnostics: {
+                standard: "Force apply skipped the state-validation gate at the user's request.",
+                before: {
+                  blockingCount: preRevision.blockingCount,
+                  criticalCount: preRevision.criticalCount,
+                  aiTellCount: preRevision.aiTellCount,
+                },
+                after: {
+                  blockingCount: preRevision.blockingCount,
+                  criticalCount: preRevision.criticalCount,
+                  aiTellCount: preRevision.aiTellCount,
+                },
+                remainingIssues: recovery.issues,
+              },
+            };
+          }
           return {
             chapterNumber: targetChapter,
             wordCount: countChapterLength(content, countingMode),
@@ -1597,18 +1749,21 @@ export class PipelineRunner {
         lengthWarning: lengthWarnings.length > 0,
       });
 
-      const improvedBlocking = effectivePostRevision.blockingCount < preRevision.blockingCount;
-      const improvedAITells = effectivePostRevision.aiTellCount < preRevision.aiTellCount;
-      const blockingDidNotWorsen = effectivePostRevision.blockingCount <= preRevision.blockingCount;
-      const criticalDidNotWorsen = effectivePostRevision.criticalCount <= preRevision.criticalCount;
-      const aiDidNotWorsen = effectivePostRevision.aiTellCount <= preRevision.aiTellCount;
-      const didNotWorsen = blockingDidNotWorsen && criticalDidNotWorsen && aiDidNotWorsen;
-      const revisionGate = this.config.revisionGate ?? "strict";
-      const shouldApplyRevision = revisionGate === "always"
-        ? true
-        : revisionGate === "lenient"
-          ? didNotWorsen
-          : didNotWorsen && (improvedBlocking || improvedAITells);
+      const revisionGate = this.config.revisionGate ?? "lenient";
+      const gateDecision = decideRevisionGate(
+        revisionGate,
+        {
+          blockingCount: preRevision.blockingCount,
+          criticalCount: preRevision.criticalCount,
+          aiTellCount: preRevision.aiTellCount,
+        },
+        {
+          blockingCount: effectivePostRevision.blockingCount,
+          criticalCount: effectivePostRevision.criticalCount,
+          aiTellCount: effectivePostRevision.aiTellCount,
+        },
+      );
+      const shouldApplyRevision = gateDecision.apply;
       const remainingIssues = effectivePostRevision.revisionBlockingIssues
         .filter((issue) => issue.severity === "warning" || issue.severity === "critical")
         .slice(0, 6)
@@ -1654,11 +1809,11 @@ export class PipelineRunner {
         en: `persisting revision for chapter ${targetChapter}`,
       });
       const chaptersDir = join(bookDir, "chapters");
-      const files = await readdir(chaptersDir);
-      const paddedNum = String(targetChapter).padStart(4, "0");
-      const existingFile = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
+      // Shared locator: accepts both `NNNN_` and `NNNN-`, and rejects a bare
+      // prefix match (`10000_…` is not chapter 1000).
+      const existingFile = await findChapterFile(bookDir, targetChapter);
       if (!existingFile) {
-        throw new Error(`Chapter ${targetChapter} file not found in ${chaptersDir} (expected filename starting with ${paddedNum})`);
+        throw new Error(`Chapter ${targetChapter} file not found in ${chaptersDir}`);
       }
       await archiveChapterVersion(bookDir, targetChapter, content, "revision");
       const reviseLang = book.language ?? gp.language;
@@ -1680,6 +1835,14 @@ export class PipelineRunner {
         });
       }
 
+      // Persist the post-revision findings so the findings store and the index
+      // summary stay in agreement (the commit gate reads the store).
+      const revisedAuditIssues = await this.persistAuditFindings(
+        bookDir,
+        targetChapter,
+        effectivePostRevision.auditResult.issues,
+      );
+
       // Update index
       const downstreamRevisionNotice = language === "en"
         ? `[warning] Chapter ${targetChapter} changed; re-review this downstream chapter for continuity.`
@@ -1691,7 +1854,7 @@ export class PipelineRunner {
               status: (effectivePostRevision.auditResult.passed ? "ready-for-review" : "audit-failed") as ChapterMeta["status"],
               wordCount: revisedCount,
               updatedAt: new Date().toISOString(),
-              auditIssues: effectivePostRevision.auditResult.issues.map((i) => `[${i.severity}] ${i.description}`),
+              auditIssues: [...revisedAuditIssues],
               lengthWarnings,
               lengthTelemetry,
             };
@@ -1699,7 +1862,10 @@ export class PipelineRunner {
         if (ch.number > targetChapter) {
           return {
             ...ch,
-            status: "needs-revision" as ChapterMeta["status"],
+            // Rewriting an earlier chapter invalidates every downstream audit, so
+            // they must be re-reviewed before they can be committed. This used to
+            // be the non-existent status `needs-revision`, which no schema accepts.
+            status: "audit-failed" as ChapterMeta["status"],
             updatedAt: new Date().toISOString(),
             auditIssues: [
               ...(ch.auditIssues ?? []).filter((issue) => !issue.includes("re-review this downstream chapter") && !issue.includes("请重新检查本章与前文")),
@@ -1821,14 +1987,49 @@ export class PipelineRunner {
     this.throwIfOperationAborted();
     const releaseLock = await this.state.acquireBookLock(bookId);
     try {
-      return await this._writeNextChapterLocked(
+      return await this.runWithDefaultWritingSkills(() => this._writeNextChapterLocked(
         bookId,
         wordCount,
         temperatureOverride,
         externalContext ?? this.config.externalContext,
-      );
+      ));
     } finally {
       await releaseLock();
+    }
+  }
+
+  /**
+   * Run a writing operation with the long-form methodology applied.
+   *
+   * The capability → skill mapping existed, but it was only consulted on the
+   * agent tool path. Writing a chapter from the "write next" button, the CLI or
+   * the daemon therefore applied no methodology at all, while the run snapshot
+   * still recorded `novel-creation-long-writing` as if it had. Resolving the
+   * built-in skill here makes the recorded skill set match what was actually
+   * used, on every entry point.
+   *
+   * Skills already active in the current operation (a chat session that selected
+   * its own) are merged rather than replaced.
+   */
+  private async runWithDefaultWritingSkills<T>(task: () => Promise<T>): Promise<T> {
+    const defaults = await this.resolveDefaultWritingSkillGuidance();
+    const merged = mergeActivatedSkillGuidance(defaults, this.currentActivatedSkills() ?? []);
+    if (merged.length === 0) return task();
+    return this.runWithAgentContext({ activatedSkills: merged }, task);
+  }
+
+  private async resolveDefaultWritingSkillGuidance(): Promise<ReadonlyArray<ActivatedSkillGuidance>> {
+    try {
+      const [{ loadAvailableAgentSkills }, { resolveProductionSkillActivations }] = await Promise.all([
+        import("../skills/builtin-loader.js"),
+        import("../skills/production-bindings.js"),
+      ]);
+      const { skills } = await loadAvailableAgentSkills({ projectRoot: this.config.projectRoot });
+      return resolveProductionSkillActivations(skills, "longWriting");
+    } catch {
+      // A project without a readable skill library still writes; it just writes
+      // without the methodology, which is what happened for every path before.
+      return [];
     }
   }
 
@@ -1916,7 +2117,9 @@ export class PipelineRunner {
       id: runId,
       stage: `chapter-${chapterNumber}`,
       model: this.config.model,
-      skillIds: ["inkos-long-writing"],
+      // What was actually applied, not a fixed label: this field used to always
+      // claim `novel-creation-long-writing` even when no skill was loaded.
+      skillIds: activatedSkillIds(this.currentActivatedSkills() ?? []),
       resumeCursor: String(chapterNumber),
     };
 
@@ -2309,6 +2512,7 @@ export class PipelineRunner {
 
     const resolvedStatus = chapterStatus ?? (auditResult.passed ? "ready-for-review" : "audit-failed");
     await persistChapterArtifacts({
+      bookDir,
       chapterNumber,
       chapterTitle: persistenceOutput.title,
       status: resolvedStatus,
@@ -3707,6 +3911,27 @@ ${matrix}`,
     };
   }
 
+  /**
+   * Persist the structured findings for an audit, and return the legacy summary
+   * strings for the index.
+   *
+   * The findings store is the single source of truth for review state; the
+   * index's `auditIssues` is a derived projection. Writing only the index (as
+   * the CLI/agent audit path used to) left the two readers disagreeing: a
+   * re-audit could never clear a stale blocker, and a previously waived blocker
+   * could mask a newly found critical. Best-effort, because the prose and index
+   * are the primary record and a failed structured copy must not fail the audit.
+   */
+  private async persistAuditFindings(
+    bookDir: string,
+    chapterNumber: number,
+    issues: ReadonlyArray<AuditIssue>,
+  ): Promise<ReadonlyArray<string>> {
+    const findings = auditIssuesToFindings(issues, { chapterNumber });
+    await saveChapterFindings({ bookDir, chapterNumber, findings }).catch(() => undefined);
+    return findingsToLegacySummary(findings);
+  }
+
   private async evaluateMergedAudit(params: {
     auditor: ContinuityAuditor;
     book: BookConfig;
@@ -3867,9 +4092,7 @@ ${matrix}`,
 
   private async readChapterContent(bookDir: string, chapterNumber: number): Promise<string> {
     const chaptersDir = join(bookDir, "chapters");
-    const files = await readdir(chaptersDir);
-    const paddedNum = String(chapterNumber).padStart(4, "0");
-    const chapterFile = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
+    const chapterFile = await findChapterFile(bookDir, chapterNumber);
     if (!chapterFile) {
       throw new Error(`Chapter ${chapterNumber} file not found in ${chaptersDir}`);
     }
@@ -3880,3 +4103,5 @@ ${matrix}`,
     return contentStart >= 0 ? lines.slice(contentStart).join("\n") : raw;
   }
 }
+
+

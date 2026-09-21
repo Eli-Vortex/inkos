@@ -1,6 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { StateManager } from "../state/manager.js";
+import { selectChapterFile } from "../state/chapter-workspace.js";
 import { analyzeAITells } from "../agents/ai-tells.js";
 import { computeAnalytics } from "./analytics.js";
 
@@ -89,8 +90,7 @@ export async function evaluateBookQuality(options: EvaluateBookQualityOptions): 
   const chapterEvals: ChapterEval[] = [];
 
   for (const ch of filteredIndex) {
-    const paddedNum = String(ch.number).padStart(4, "0");
-    const file = chapterFiles.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
+    const file = selectChapterFile(chapterFiles, ch.number);
     const content = file ? await readFile(join(chaptersDir, file), "utf-8") : "";
     const aiTells = content ? analyzeAITells(content) : { issues: [] };
     const paragraphs = content

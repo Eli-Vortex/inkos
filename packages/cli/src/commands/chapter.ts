@@ -29,7 +29,15 @@ chapterCommand
       const book = await state.loadBookConfig(bookId);
       const language = resolveCliLanguage(book.language);
 
-      const result = await syncChapterWordCounts(state, bookId);
+      // Word-count sync rewrites the whole index; without the book lock it can
+      // clobber a chapter a concurrent writer just persisted.
+      const releaseLock = await state.acquireBookLock(bookId);
+      let result: Awaited<ReturnType<typeof syncChapterWordCounts>>;
+      try {
+        result = await syncChapterWordCounts(state, bookId);
+      } finally {
+        await releaseLock();
+      }
 
       if (opts.json) {
         log(JSON.stringify(result, null, 2));
@@ -92,9 +100,18 @@ chapterCommand
         }
       }
 
-      const result = await deleteLatestChapter(state, bookId, {
-        ...(requestedChapter === undefined ? {} : { chapterNumber: requestedChapter }),
-      });
+      // Rollback rewrites the index, snapshots and chapter files. Take the book
+      // lock so a concurrently running writer cannot interleave and resurrect
+      // the deleted chapter with its own later index write.
+      const releaseLock = await state.acquireBookLock(bookId);
+      let result: Awaited<ReturnType<typeof deleteLatestChapter>>;
+      try {
+        result = await deleteLatestChapter(state, bookId, {
+          ...(requestedChapter === undefined ? {} : { chapterNumber: requestedChapter }),
+        });
+      } finally {
+        await releaseLock();
+      }
 
       if (opts.json) {
         log(JSON.stringify(result, null, 2));

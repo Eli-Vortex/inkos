@@ -65,13 +65,38 @@ export function invalidateApiPaths(paths: ReadonlyArray<string>): void {
   }));
 }
 
-async function readErrorMessage(res: Response): Promise<string> {
+/**
+ * An API failure that preserves the HTTP status and response body.
+ *
+ * Callers that only read `.message` keep working, but a caller that must react
+ * differently to a 412 than to a 503 — the editor's rebase prompt, for example —
+ * can now do so without re-parsing a string.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly payload: unknown;
+  constructor(message: string, status: number, payload: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
+async function readError(res: Response): Promise<{ message: string; payload: unknown }> {
   const contentType = res.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {
     try {
-      const json = await res.json() as { error?: unknown };
+      const json = await res.json() as { error?: unknown; message?: unknown };
+      const payload = json;
+      // Prefer an explicit human message; several endpoints return a stable
+      // machine `error` code alongside it, and showing the code to an author
+      // tells them nothing.
+      if (typeof json.message === "string" && json.message.trim()) {
+        return { message: localizeKnownRuntimeMessage(json.message), payload };
+      }
       if (typeof json.error === "string" && json.error.trim()) {
-        return localizeKnownRuntimeMessage(json.error);
+        return { message: localizeKnownRuntimeMessage(json.error), payload };
       }
       if (
         json.error &&
@@ -80,13 +105,20 @@ async function readErrorMessage(res: Response): Promise<string> {
         typeof (json.error as { message?: unknown }).message === "string" &&
         (json.error as { message: string }).message.trim()
       ) {
-        return localizeKnownRuntimeMessage((json.error as { message: string }).message);
+        return {
+          message: localizeKnownRuntimeMessage((json.error as { message: string }).message),
+          payload,
+        };
       }
+      return { message: localizeKnownRuntimeMessage(`${res.status} ${res.statusText}`.trim()), payload };
     } catch {
       // fall through
     }
   }
-  return localizeKnownRuntimeMessage(`${res.status} ${res.statusText}`.trim());
+  return {
+    message: localizeKnownRuntimeMessage(`${res.status} ${res.statusText}`.trim()),
+    payload: undefined,
+  };
 }
 
 export async function fetchJson<T>(
@@ -103,7 +135,8 @@ export async function fetchJson<T>(
   const res = await fetchImpl(url, init);
 
   if (!res.ok) {
-    throw new Error(await readErrorMessage(res));
+    const { message, payload } = await readError(res);
+    throw new ApiError(message, res.status, payload);
   }
 
   if (res.status === 204) {

@@ -233,12 +233,12 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     }
   },
 
-  createSession: async (bookId, sessionKind, playMode) => {
+  createSession: async (bookId, sessionKind, playMode, genre) => {
     abortPreviousChatRound(null);
     const data = await fetchJson<SessionResponse>("/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bookId, sessionKind, playMode }),
+      body: JSON.stringify({ bookId, sessionKind, playMode, genre }),
     });
     const sessionId = data.session?.sessionId;
     if (!sessionId) {
@@ -251,6 +251,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         bookId: data.session?.bookId ?? bookId ?? null,
         sessionKind: data.session?.sessionKind ?? sessionKind,
         playMode: data.session?.playMode,
+        genre: (data.session as any)?.genre ?? genre,
         title: data.session?.title ?? null,
       });
       return {
@@ -272,11 +273,11 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     return sessionId;
   },
 
-  createDraftSession: (bookId, sessionKind, playMode) => {
+  createDraftSession: (bookId, sessionKind, playMode, genre) => {
     abortPreviousChatRound(null);
     // 前端生成 sessionId（与后端 createBookSession 同格式），暂不持久化到磁盘，
     // 也暂不写入 sessionIdsByBook——侧边栏看不到这条 draft。
-    // 发送第一条消息时 sendMessage 会调 POST /sessions { sessionId, bookId } 落盘
+    // 发送第一条消息时 sendMessage 会调 POST /sessions { sessionId, bookId, genre } 落盘
     // 并把 id 追加进 sessionIdsByBook，那一刻侧边栏才出现该会话（带着 title）。
     const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     set((state) => {
@@ -285,6 +286,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         bookId,
         sessionKind,
         playMode,
+        genre,
         title: null,
         isDraft: true,
       });
@@ -379,6 +381,43 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       await fetchJson(`/sessions/${sessionId}/abort${chatOnly ? "?scope=chat" : ""}`, {
         method: "POST",
       });
+    } catch (error) {
+      get().addErrorMessage(sessionId, error instanceof Error ? error.message : String(error));
+    }
+  },
+
+  rewindSession: async (sessionId, turns = 1) => {
+    const session = get().sessions[sessionId];
+    if (!session || session.isDraft) return;
+    // Stop the in-flight round first so nothing appends after the truncation.
+    if (session.isChatStreaming) {
+      await get().abortSession(sessionId, "all");
+    }
+    session.stream?.close();
+    try {
+      const data = await fetchJson<SessionResponse>(`/sessions/${sessionId}/rewind`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ turns }),
+      });
+      const detail = data.session;
+      if (!detail?.sessionId) return;
+      // Replace local messages outright: the normal detail reload keeps local
+      // messages when the session is non-empty, which would undo the rewind.
+      const messages = detail.messages ? deserializeMessages(detail.messages) : [];
+      set((state) => ({
+        sessions: updateSession(state.sessions, sessionId, () => ({
+          messages,
+          isStreaming: false,
+          isChatStreaming: false,
+          stream: null,
+          lastError: null,
+        })),
+        resolvedProposals: {
+          ...state.resolvedProposals,
+          ...deriveResolvedProposals(messages),
+        },
+      }));
     } catch (error) {
       get().addErrorMessage(sessionId, error instanceof Error ? error.message : String(error));
     }
@@ -504,7 +543,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         await fetchJson<SessionResponse>("/sessions", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId, bookId: session.bookId, sessionKind, playMode }),
+          body: JSON.stringify({ sessionId, bookId: session.bookId, sessionKind, playMode, genre: session.genre }),
         });
         // 落盘成功：把 isDraft 翻成 false，同时把 sessionId 追加进 sessionIdsByBook
         // 让侧边栏现在才看到这条会话。
@@ -545,7 +584,9 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       })),
     }));
 
-    get().addUserMessage(sessionId, formatUserMessageForDisplay(userInstruction, attachments));
+    if (!options?.skipUserMessage) {
+      get().addUserMessage(sessionId, formatUserMessageForDisplay(userInstruction, attachments));
+    }
     // 单连接原则：任务恢复流等旧连接先关掉，换成本轮的新连接。
     // 运行中的任务卡不受影响——新连接建立时服务端会重放 running 快照，
     // 任务日志（log）与收尾（tool:end）都按 execution id 匹配，与 streamTs 无关。
@@ -554,7 +595,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     set((state) => ({
       sessions: updateSession(state.sessions, sessionId, () => ({ stream: streamEs })),
     }));
-    attachSessionStreamListeners({ sessionId, streamTs, sourceRequestId, streamEs, set, get });
+    const streamHandlers = attachSessionStreamListeners({ sessionId, streamTs, sourceRequestId, streamEs, set, get });
 
     try {
       const data = await fetchJson<AgentResponse>("/agent", {
@@ -572,6 +613,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           disabledSkills,
           attachments,
           sessionId,
+          genre: session.genre,
           clientRequestId: sourceRequestId,
           model: get().selectedModel ?? undefined,
           service: get().selectedService ?? undefined,
@@ -605,6 +647,10 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           };
         });
       }
+      // Flush batched stream deltas first: otherwise a message that streamed in
+      // under the 48ms batch window is not in the store yet, `hasStream` reads
+      // false, and the final content is appended as a second assistant bubble.
+      streamHandlers.flush();
       const hasStream = Boolean(
         get().sessions[sessionId]?.messages.some((message) => message.timestamp === streamTs),
       );
@@ -730,7 +776,12 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     set((state) => ({
       sessions: updateSession(state.sessions, sessionId, () => ({ lastFailedSend: undefined })),
     }));
-    await get().sendMessage(sessionId, failed.text, failed.options);
+    // Replay must not append the user bubble again — the original send already
+    // did, and it was never removed on failure.
+    await get().sendMessage(sessionId, failed.text, {
+      ...(failed.options ?? {}),
+      skipUserMessage: true,
+    });
     },
   };
 };

@@ -19,6 +19,7 @@ const evaluateBookQualityMock = vi.fn();
 const reviseDraftMock = vi.fn();
 const resyncChapterArtifactsMock = vi.fn();
 const writeNextChapterMock = vi.fn();
+const continuityAuditMock = vi.fn();
 const writeChaptersMock = vi.fn();
 const rollbackToChapterMock = vi.fn();
 const deleteLatestChapterMock = vi.fn();
@@ -287,6 +288,12 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     consolidate = consolidateMock;
   }
 
+  class MockContinuityAuditor {
+    constructor(_config: unknown) {}
+
+    auditChapter = continuityAuditMock;
+  }
+
   class MockPlayRunner {
     constructor(args: unknown) {
       playRunnerCtorArgs.push(args);
@@ -335,6 +342,24 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     deleteLatestChapter: deleteLatestChapterMock,
     executeEditTransaction: actual.executeEditTransaction,
     listChapterVersions: actual.listChapterVersions,
+    readChapterRevision: actual.readChapterRevision,
+    commitChapter: actual.commitChapter,
+    validateChapterGate: actual.validateChapterGate,
+    readChapterFindings: actual.readChapterFindings,
+    saveChapterFindings: actual.saveChapterFindings,
+    auditIssuesToFindings: actual.auditIssuesToFindings,
+    auditIssuesToLegacySummary: actual.auditIssuesToLegacySummary,
+    findingsToLegacySummary: actual.findingsToLegacySummary,
+    waiverBasisHash: actual.waiverBasisHash,
+    findChapterFile: actual.findChapterFile,
+    deriveBookIdFromTitle: actual.deriveBookIdFromTitle,
+    truncateTranscriptTurns: actual.truncateTranscriptTurns,
+    listBookMaterials: actual.listBookMaterials,
+    readBookMaterial: actual.readBookMaterial,
+    deslopProducer: actual.deslopProducer,
+    FindingProducerRegistry: actual.FindingProducerRegistry,
+    isStaleAuditStatus: actual.isStaleAuditStatus,
+    waiveChapterFinding: actual.waiveChapterFinding,
     readChapterPlanDocument: actual.readChapterPlanDocument,
     readChapterUserBrief: actual.readChapterUserBrief,
     readChapterVersion: actual.readChapterVersion,
@@ -368,6 +393,7 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     }),
     PlayRunner: MockPlayRunner,
     ConsolidatorAgent: MockConsolidatorAgent,
+    ContinuityAuditor: MockContinuityAuditor,
     PlayStore: actual.PlayStore,
     createPlayDB: actual.createPlayDB,
     buildPlayEntityImagePrompt: actual.buildPlayEntityImagePrompt,
@@ -508,6 +534,7 @@ describe("createStudioServer daemon lifecycle", () => {
     reviseDraftMock.mockReset();
     resyncChapterArtifactsMock.mockReset();
     writeNextChapterMock.mockReset();
+    continuityAuditMock.mockReset();
     writeChaptersMock.mockReset();
     rollbackToChapterMock.mockReset();
     deleteLatestChapterMock.mockReset();
@@ -3474,7 +3501,7 @@ describe("createStudioServer daemon lifecycle", () => {
       expect.objectContaining({
         language: "en",
         defaultSkills: [expect.objectContaining({
-          skill: expect.objectContaining({ id: "inkos-short-writing" }),
+          skill: expect.objectContaining({ id: "novel-creation-short-writing" }),
         })],
       }),
     );
@@ -3529,7 +3556,7 @@ describe("createStudioServer daemon lifecycle", () => {
       root,
       expect.objectContaining({
         defaultSkills: expect.arrayContaining([
-          expect.objectContaining({ skill: expect.objectContaining({ id: "inkos-short-writing" }) }),
+          expect.objectContaining({ skill: expect.objectContaining({ id: "novel-creation-short-writing" }) }),
           expect.objectContaining({ skill: expect.objectContaining({ id: "evidence-tone" }) }),
         ]),
       }),
@@ -4638,7 +4665,7 @@ describe("createStudioServer daemon lifecycle", () => {
             tool: "play_start",
             status: "completed",
             result: "暴雨敲着铁皮门，封存档案箱压在门口。",
-            details: expect.objectContaining({ skillIds: ["inkos-play-world"] }),
+            details: expect.objectContaining({ skillIds: ["novel-creation-play-world"] }),
           }),
         ],
       },
@@ -4897,7 +4924,7 @@ describe("createStudioServer daemon lifecycle", () => {
   }, 60_000);
 
   it("returns BOOK_BUSY when direct write-next collides with an active write", async () => {
-    const lockError = 'Book "demo-book" is locked by an active InkOS write. Wait for it to finish or stop the running task, then retry.';
+    const lockError = 'Book "demo-book" is locked by an active Novel Creation write. Wait for it to finish or stop the running task, then retry.';
     writeNextChapterMock.mockRejectedValueOnce(Object.assign(new Error(lockError), { code: "BOOK_BUSY" }));
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -5190,6 +5217,101 @@ describe("createStudioServer daemon lifecycle", () => {
     );
   });
 
+  it("blocks write-next behind the outline gate until the plan is approved", async () => {
+    await writeCompleteBookFixture(root, "demo-book", "Demo Book");
+    writeNextChapterMock.mockClear();
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // No plan at all for the next chapter: prose generation is refused, and the
+    // refusal names the gate rule so the author knows what to do.
+    const blocked = await app.request(
+      "http://localhost/api/v1/books/demo-book/write-next",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) },
+    );
+    expect(blocked.status).toBe(422);
+    const payload = await blocked.json() as { error?: string; findings?: Array<{ rule: string }> };
+    expect(payload.error).toBe("OUTLINE_GATE_BLOCKED");
+    expect(payload.findings?.map((finding) => finding.rule))
+      .toContain("contract.outline.missing");
+    expect(writeNextChapterMock).not.toHaveBeenCalled();
+  });
+
+  it("persists the audit verdict so a re-audit can clear the commit block", async () => {
+    await writeCompleteBookFixture(root, "demo-book", "Demo Book");
+    await mkdir(join(root, "books", "demo-book", "chapters"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "chapters", "0001_First.md"), "# 第一章\n\n正文。", "utf-8");
+
+    // A manual edit left the chapter needing review, which is what blocks a commit.
+    loadChapterIndexMock.mockResolvedValue([{
+      number: 1,
+      title: "第一章",
+      status: "audit-failed",
+      wordCount: 800,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      auditIssues: ["[warning] Manual chapter replacement requires review before continuation."],
+      lengthWarnings: [],
+    }]);
+    continuityAuditMock.mockResolvedValueOnce({ passed: true, summary: "ok", issues: [] });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request(
+      "http://localhost/api/v1/books/demo-book/audit/1",
+      { method: "POST" },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ passed: true, persisted: true });
+
+    // The verdict reached the index: without this the chapter stayed
+    // `audit-failed` forever, so the commit gate could never be satisfied and
+    // "re-audit" was a dead end.
+    const saved = saveChapterIndexMock.mock.calls.at(-1)?.[1] as Array<{ status: string; auditIssues: string[] }>;
+    expect(saved[0]?.status).toBe("ready-for-review");
+    expect(saved[0]?.auditIssues).toEqual([]);
+
+    // Structured findings were written too, not just the compat summary.
+    const findings = JSON.parse(
+      await readFile(join(root, "books", "demo-book", "chapters", "findings", "0001.json"), "utf-8"),
+    ) as { findings: unknown[] };
+    expect(findings.findings).toEqual([]);
+  });
+
+  it("does not record an unparsable audit response as a verdict", async () => {
+    await writeCompleteBookFixture(root, "demo-book", "Demo Book");
+    await mkdir(join(root, "books", "demo-book", "chapters"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "chapters", "0001_First.md"), "# 第一章\n\n正文。", "utf-8");
+
+    loadChapterIndexMock.mockResolvedValue([{
+      number: 1,
+      title: "第一章",
+      status: "audit-failed",
+      wordCount: 800,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      auditIssues: ["[warning] needs review"],
+      lengthWarnings: [],
+    }]);
+    continuityAuditMock.mockResolvedValueOnce({
+      passed: true,
+      summary: "unparsable",
+      issues: [],
+      parseFailed: true,
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+    const response = await app.request(
+      "http://localhost/api/v1/books/demo-book/audit/1",
+      { method: "POST" },
+    );
+    expect(await response.json()).toMatchObject({ persisted: false });
+    // "We could not read the verdict" must not be stored as a pass.
+    expect(saveChapterIndexMock).not.toHaveBeenCalled();
+  });
+
   it("passes configured long-form writing review retries into Studio write-next", async () => {
     await writeFile(
       join(root, "inkos.json"),
@@ -5206,7 +5328,8 @@ describe("createStudioServer daemon lifecycle", () => {
     const response = await app.request("http://localhost/api/v1/books/demo-book/write-next", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      // This case asserts the pipeline config plumbing, not the outline gate.
+      body: JSON.stringify({ skipGate: true }),
     });
 
     expect(response.status).toBe(200);
@@ -5835,7 +5958,7 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(chatCompletionMock).not.toHaveBeenCalled();
   });
 
-  it("classifies InkOS parser/tool errors as internal instead of blaming the selected provider", async () => {
+  it("classifies Novel Creation parser/tool errors as internal instead of blaming the selected provider", async () => {
     const internalError = "sub_agent writer failed: missing YAML frontmatter delimiters";
     runAgentSessionMock.mockResolvedValueOnce({
       responseText: "",
@@ -5859,7 +5982,7 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(response.status).toBe(500);
     const json = await response.json() as { error: { code: string; message: string }; response: string };
     expect(json.error.code).toBe("AGENT_INTERNAL_ERROR");
-    expect(json.error.message).toContain("InkOS 内部流程错误");
+    expect(json.error.message).toContain("Novel Creation 内部流程错误");
     expect(json.error.message).toContain("missing YAML frontmatter delimiters");
     expect(json.error.message).not.toMatch(/kkaiapi/i);
     expect(json.response).toBe(json.error.message);
@@ -5867,7 +5990,7 @@ describe("createStudioServer daemon lifecycle", () => {
   });
 
   it("returns an active book write lock as BOOK_BUSY instead of a provider error", async () => {
-    const lockError = 'Book "demo-book" is locked by an active InkOS write (pid:123). Wait for it to finish or stop the running task, then retry. Stale locks are recovered automatically.';
+    const lockError = 'Book "demo-book" is locked by an active Novel Creation write (pid:123). Wait for it to finish or stop the running task, then retry. Stale locks are recovered automatically.';
     runAgentSessionMock.mockResolvedValueOnce({
       responseText: "",
       errorMessage: lockError,
@@ -6439,7 +6562,11 @@ describe("createStudioServer daemon lifecycle", () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
-    const response = await app.request("http://localhost/api/v1/books/demo-book/write-next", { method: "POST" });
+    const response = await app.request("http://localhost/api/v1/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skipGate: true }),
+    });
 
     expect(response.status).toBe(200);
     expect(pipelineConfigs.at(-1)).toMatchObject({ chapterReviewMode: "manual" });
@@ -6467,7 +6594,7 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(pipelineConfigs.at(-1)).toMatchObject({ revisionGate: "always" });
   });
 
-  it("defaults the revisionGate to strict when neither book nor project sets one", async () => {
+  it("defaults the revisionGate to lenient when neither book nor project sets one", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
@@ -6478,7 +6605,7 @@ describe("createStudioServer daemon lifecycle", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(pipelineConfigs.at(-1)).toMatchObject({ revisionGate: "strict" });
+    expect(pipelineConfigs.at(-1)).toMatchObject({ revisionGate: "lenient" });
   });
 
   it("exposes a global default model endpoint backed by llm.defaultModel", async () => {
@@ -6833,3 +6960,13 @@ describe("createStudioServer daemon lifecycle", () => {
   });
 
 });
+
+
+
+
+
+
+
+
+
+

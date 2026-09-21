@@ -699,7 +699,9 @@ export async function runInteractionRequest(params: {
           en: "No active book is bound to the interaction session.",
         }));
       }
-      if (!request.chapterNumber || !request.targetText || !request.replacementText) {
+      // Empty replacementText is valid (it deletes the matched text); only a
+      // missing one is an error.
+      if (!request.chapterNumber || !request.targetText || request.replacementText === undefined) {
         throw new Error(localize(language, {
           zh: "正文修补需要章节号、目标文本和替换文本。",
           en: "Chapter patch requires chapter number, target text, and replacement text.",

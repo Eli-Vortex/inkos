@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { PipelineRunner, StateManager, resolveChapterReviewMode } from "@actalk/inkos-core";
+import { PipelineRunner, StateManager, parseChapterFileNumber, resolveChapterReviewMode } from "@actalk/inkos-core";
 import { readdir, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -186,8 +186,9 @@ writeCommand
 
       // Remove existing chapter file
       const files = await readdir(chaptersDir);
-      const paddedNum = String(chapter).padStart(4, "0");
-      const existing = files.filter((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
+      // Shared parser: a 4-character slice misread `10000_x.md` as chapter 1000,
+      // and a bare prefix match missed the hyphen naming form.
+      const existing = files.filter((f) => parseChapterFileNumber(f) === chapter);
       for (const f of existing) {
         await unlink(join(chaptersDir, f));
         if (!opts.json) log(`Removed: ${f}`);
@@ -200,8 +201,8 @@ writeCommand
 
       // Also remove later chapter files since state will be rolled back
       const laterFiles = files.filter((f) => {
-        const num = parseInt(f.slice(0, 4), 10);
-        return num > chapter && f.endsWith(".md");
+        const num = parseChapterFileNumber(f);
+        return num !== null && num > chapter;
       });
       for (const f of laterFiles) {
         await unlink(join(chaptersDir, f));

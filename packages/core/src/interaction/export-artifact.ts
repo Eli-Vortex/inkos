@@ -1,6 +1,8 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { EPub } from "epub-gen-memory";
+import { buildChapterFileLookup } from "../state/chapter-workspace.js";
+import { escapeHtml } from "../utils/escape-html.js";
 
 export interface ExportStateLike {
   readonly bookDir: (bookId: string) => string;
@@ -20,27 +22,6 @@ export interface ExportArtifact {
   readonly format: "txt" | "md" | "epub";
   readonly contentType: string;
   readonly payload: string | Buffer;
-}
-
-function buildChapterFileLookup(files: ReadonlyArray<string>): ReadonlyMap<number, string> {
-  const lookup = new Map<number, string>();
-  for (const file of files) {
-    if (!file.endsWith(".md") || !/^\d{4}/.test(file)) {
-      continue;
-    }
-    const chapterNumber = parseInt(file.slice(0, 4), 10);
-    if (!lookup.has(chapterNumber)) {
-      lookup.set(chapterNumber, file);
-    }
-  }
-  return lookup;
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
 }
 
 function markdownToSimpleHtml(markdown: string): { title: string; html: string } {

@@ -530,8 +530,12 @@ async function loadDurableArtifactChapterNumbers(bookDir: string): Promise<numbe
   const [indexChapters, fileChapters] = await Promise.all([
     readFile(indexPath, "utf-8")
       .then((raw) => {
-        const parsed = JSON.parse(raw) as Array<{ number?: unknown }>;
+        const parsed = JSON.parse(raw) as Array<{ number?: unknown; status?: unknown }>;
         return parsed
+          // A planned chapter (`card-generated`) has an index entry but no prose.
+          // Counting it as durable progress would advance "next chapter to write"
+          // past it, so planning chapter 1 would make the writer target chapter 2.
+          .filter((entry) => entry?.status !== "card-generated")
           .map((entry) => entry?.number)
           .filter((entry): entry is number => typeof entry === "number" && Number.isInteger(entry) && entry > 0);
       })

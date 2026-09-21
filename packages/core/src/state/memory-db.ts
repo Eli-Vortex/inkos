@@ -1,5 +1,5 @@
 /**
- * Temporal memory database for InkOS truth files.
+ * Temporal memory database for Novel Creation truth files.
  *
  * Uses Node.js built-in SQLite (node:sqlite, Node 22+).
  * Stores facts with temporal validity (valid_from/valid_until chapter numbers),
@@ -132,6 +132,19 @@ export class MemoryDB {
     }
   }
 
+  /** Run `fn` inside a single sqlite transaction, rolling back on error. */
+  private inTransaction<T>(fn: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = fn();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Facts (temporal)
   // ---------------------------------------------------------------------------
@@ -210,10 +223,22 @@ export class MemoryDB {
   }
 
   replaceCurrentFacts(facts: ReadonlyArray<Omit<Fact, "id">>): void {
-    this.db.exec("DELETE FROM facts WHERE valid_until_chapter IS NULL");
-    for (const fact of facts) {
-      this.addFact(fact);
-    }
+    // One transaction + one prepared statement for the whole rebuild. The old
+    // loop used one implicit transaction (and a fresh prepare) per fact, which
+    // made a full-table rebuild O(N) fsyncs on the event loop.
+    const insert = this.db.prepare(
+      `INSERT INTO facts (subject, predicate, object, valid_from_chapter, valid_until_chapter, source_chapter)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    this.inTransaction(() => {
+      this.db.exec("DELETE FROM facts WHERE valid_until_chapter IS NULL");
+      for (const fact of facts) {
+        insert.run(
+          fact.subject, fact.predicate, fact.object,
+          fact.validFromChapter, fact.validUntilChapter ?? null, fact.sourceChapter,
+        );
+      }
+    });
   }
 
   resetFacts(): void {
@@ -236,10 +261,19 @@ export class MemoryDB {
   }
 
   replaceSummaries(summaries: ReadonlyArray<StoredSummary>): void {
-    this.db.exec("DELETE FROM chapter_summaries");
-    for (const summary of summaries) {
-      this.upsertSummary(summary);
-    }
+    const upsert = this.db.prepare(
+      `INSERT OR REPLACE INTO chapter_summaries (chapter, title, characters, events, state_changes, hook_activity, mood, chapter_type)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    this.inTransaction(() => {
+      this.db.exec("DELETE FROM chapter_summaries");
+      for (const summary of summaries) {
+        upsert.run(
+          summary.chapter, summary.title, summary.characters, summary.events,
+          summary.stateChanges, summary.hookActivity, summary.mood, summary.chapterType,
+        );
+      }
+    });
   }
 
   /** Get summaries for a range of chapters. */
@@ -326,10 +360,25 @@ export class MemoryDB {
   }
 
   replaceHooks(hooks: ReadonlyArray<StoredHook>): void {
-    this.db.exec("DELETE FROM hooks");
-    for (const hook of hooks) {
-      this.upsertHook(hook);
-    }
+    const upsert = this.db.prepare(
+      `INSERT OR REPLACE INTO hooks (hook_id, start_chapter, type, status, last_advanced_chapter, expected_payoff, payoff_timing, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    this.inTransaction(() => {
+      this.db.exec("DELETE FROM hooks");
+      for (const hook of hooks) {
+        upsert.run(
+          hook.hookId,
+          hook.startChapter,
+          hook.type,
+          hook.status,
+          hook.lastAdvancedChapter,
+          hook.expectedPayoff,
+          hook.payoffTiming ?? "",
+          hook.notes,
+        );
+      }
+    });
   }
 
   getActiveHooks(): ReadonlyArray<StoredHook> {

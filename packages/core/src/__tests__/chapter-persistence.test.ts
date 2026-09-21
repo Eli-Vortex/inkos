@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AuditIssue, AuditResult } from "../agents/continuity.js";
 import type { ChapterMeta } from "../models/chapter.js";
 import { persistChapterArtifacts } from "../pipeline/chapter-persistence.js";
@@ -30,6 +33,7 @@ function createAuditResult(overrides?: Partial<AuditResult>): AuditResult {
 
 describe("persistChapterArtifacts", () => {
   it("persists truth files, index, drift guidance, and snapshots for reviewable chapters", async () => {
+    const bookDir = await mkdtemp(join(tmpdir(), "inkos-persist-"));
     const saveChapter = vi.fn().mockResolvedValue(undefined);
     const saveTruthFiles = vi.fn().mockResolvedValue(undefined);
     const saveChapterIndex = vi.fn().mockResolvedValue(undefined);
@@ -40,6 +44,7 @@ describe("persistChapterArtifacts", () => {
     const logSnapshotStage = vi.fn();
 
     await persistChapterArtifacts({
+      bookDir,
       chapterNumber: 3,
       chapterTitle: "Chapter Title",
       status: "ready-for-review",
@@ -94,6 +99,7 @@ describe("persistChapterArtifacts", () => {
   });
 
   it("skips truth persistence and snapshots for state-degraded chapters while preserving review note", async () => {
+    const bookDir = await mkdtemp(join(tmpdir(), "inkos-persist-"));
     const saveChapter = vi.fn().mockResolvedValue(undefined);
     const saveTruthFiles = vi.fn().mockResolvedValue(undefined);
     const saveChapterIndex = vi.fn().mockResolvedValue(undefined);
@@ -104,6 +110,7 @@ describe("persistChapterArtifacts", () => {
     const logSnapshotStage = vi.fn();
 
     await persistChapterArtifacts({
+      bookDir,
       chapterNumber: 4,
       chapterTitle: "Degraded Chapter",
       status: "state-degraded",
@@ -151,6 +158,7 @@ describe("persistChapterArtifacts", () => {
   });
 
   it("replaces existing entry for the same chapter number instead of appending", async () => {
+    const bookDir = await mkdtemp(join(tmpdir(), "inkos-persist-"));
     const saveChapterIndex = vi.fn().mockResolvedValue(undefined);
     const existingEntry: ChapterMeta = {
       number: 1,
@@ -164,6 +172,7 @@ describe("persistChapterArtifacts", () => {
     };
 
     await persistChapterArtifacts({
+      bookDir,
       chapterNumber: 1,
       chapterTitle: "New Title",
       status: "ready-for-review",

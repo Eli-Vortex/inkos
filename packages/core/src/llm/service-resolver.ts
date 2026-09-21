@@ -3,7 +3,7 @@ import type { Model, Api } from "@mariozechner/pi-ai";
 import { resolveServicePiProvider, resolveServicePreset } from "./service-presets.js";
 import { getServiceApiKey } from "./secrets.js";
 import { getEndpoint } from "./providers/index.js";
-import type { InkosEndpoint } from "./providers/types.js";
+import { resolveProviderCompat } from "./provider-compat.js";
 import { isApiKeyOptionalForEndpoint } from "../utils/llm-endpoint-auth.js";
 
 export interface ResolvedModel {
@@ -14,16 +14,7 @@ export interface ResolvedModel {
   temperatureHint?: string;
 }
 
-function resolveProviderCompat(
-  provider: InkosEndpoint | undefined,
-  baseUrl: string,
-): Record<string, unknown> | undefined {
-  const compat = {
-    ...(provider?.compat ?? {}),
-    ...(baseUrl.includes("generativelanguage.googleapis.com") ? { supportsStore: false } : {}),
-  };
-  return Object.keys(compat).length > 0 ? compat : undefined;
-}
+
 
 export async function resolveServiceModel(
   service: string,

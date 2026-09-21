@@ -26,6 +26,8 @@
   "scripts": {
     "build": "pnpm -r build",
     "dev": "pnpm -r --parallel dev",
+    "dev:studio": "node scripts/dev.mjs",
+    "dev:studio:stop": "node scripts/dev-stop.mjs",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",

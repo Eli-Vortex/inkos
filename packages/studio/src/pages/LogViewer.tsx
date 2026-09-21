@@ -16,7 +16,7 @@ interface Nav {
 
 const LEVEL_COLORS: Record<string, string> = {
   error: "text-destructive",
-  warn: "text-amber-500",
+  warn: "text-warning",
   info: "text-primary/70",
   debug: "text-muted-foreground/50",
 };

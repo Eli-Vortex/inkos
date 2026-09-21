@@ -13,6 +13,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
 } from "../components/ui/dropdown-menu";
+import { EmptyState, ErrorState, LoadingState } from "../components/ui/states";
 import {
   Reasoning,
   ReasoningTrigger,
@@ -81,6 +82,7 @@ interface Nav {
 export interface ChatPageProps {
   readonly activeBookId?: string;
   readonly mode?: "book" | "book-create" | "project-chat" | "interactive-film-authoring";
+  readonly genre?: string;
   readonly nav: Nav;
   readonly theme: Theme;
   readonly t: TFunction;
@@ -240,7 +242,7 @@ function SkillPickerPanel({
       <div className="max-h-[380px] overflow-y-auto p-3">
         {createError ? <div className="mb-3 rounded-xl bg-destructive/10 px-3 py-2 text-xs text-destructive">{createError}</div> : null}
         {diagnostics?.length ? (
-          <div className="mb-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          <div className="mb-3 rounded-xl border border-warning/35 bg-warning-soft px-3 py-2 text-xs text-warning dark:text-warning">
             <div className="font-semibold">{isZh ? "部分外部 Skill 未加载" : "Some external skills were not loaded"}</div>
             {diagnostics.slice(0, 4).map((item, index) => (
               <div key={`${item.path ?? "skill"}-${index}`} className="mt-1 break-all">
@@ -250,11 +252,15 @@ function SkillPickerPanel({
           </div>
         ) : null}
         {loading ? (
-          <div className="px-2 py-6 text-center text-sm text-muted-foreground">{isZh ? "加载 Skill..." : "Loading skills..."}</div>
+          <LoadingState label={isZh ? "加载 Skill..." : "Loading skills..."} rows={3} />
         ) : error ? (
-          <div className="rounded-xl bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>
+          <ErrorState title={isZh ? "Skill 加载失败" : "Failed to load skills"} message={error} />
         ) : skills.length === 0 ? (
-          <div className="px-2 py-6 text-center text-sm text-muted-foreground">{isZh ? "还没有可用 Skill。" : "No skills available yet."}</div>
+          <EmptyState
+            title={isZh ? "还没有可用 Skill。" : "No skills available yet."}
+            description={isZh ? "安装或导入 Skill 后，它们会出现在这里供创作时调用。" : "Installed or imported skills appear here for use while writing."}
+            className="py-8"
+          />
         ) : (
           <div className="grid gap-2 md:grid-cols-2">
             {skills.map((skill) => {
@@ -294,7 +300,7 @@ function SkillPickerPanel({
 
 // -- Component --
 
-export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-create", nav, theme, t, sse: _sse }: ChatPageProps) {
+export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-create", genre, nav, theme, t, sse: _sse }: ChatPageProps) {
   // -- Store selectors --
   const messages = useChatStore(chatSelectors.activeMessages);
   const activeSession = useChatStore(chatSelectors.activeSession);
@@ -310,6 +316,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
   const sendMessage = useChatStore((s) => s.sendMessage);
   const retryLastSend = useChatStore((s) => s.retryLastSend);
   const abortSession = useChatStore((s) => s.abortSession);
+  const rewindSession = useChatStore((s) => s.rewindSession);
   const setSelectedModel = useChatStore((s) => s.setSelectedModel);
   const loadSessionList = useChatStore((s) => s.loadSessionList);
   const createSession = useChatStore((s) => s.createSession);
@@ -535,7 +542,9 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
 
       const existingId = mode === "project-chat"
         ? getProjectChatSessionId()
-        : getBookCreateSessionId();
+        : genre
+          ? undefined // If genre is specified in URL, always open a targeted new session
+          : getBookCreateSessionId();
       if (existingId) {
         await loadSessionDetail(existingId);
         if (cancelled) return;
@@ -561,11 +570,11 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
         }
       }
 
-      const newSessionId = await createSession(null, mode === "book-create" ? "book-create" : "chat");
+      const newSessionId = await createSession(null, mode === "book-create" ? "book-create" : "chat", undefined, genre);
       if (!cancelled) {
         if (mode === "project-chat") {
           setProjectChatSessionId(newSessionId);
-        } else {
+        } else if (!genre) {
           setBookCreateSessionId(newSessionId);
         }
       }
@@ -574,7 +583,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
     return () => {
       cancelled = true;
     };
-  }, [activeBookId, activateSession, createSession, loadSessionDetail, loadSessionList, mode]);
+  }, [activeBookId, activateSession, createSession, loadSessionDetail, loadSessionList, mode, genre]);
 
   const addAttachedFiles = (files: FileList | File[]) => {
     const incoming = Array.from(files);
@@ -604,8 +613,9 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
     autoScrollPinnedRef.current = true;
     const attachments = await serializeChatAttachments(attachedFiles);
     if (chatStreaming) {
-      // Steering by a new user message cancels the current serial workflow.
-      await abortSession(activeSessionId);
+      // Steering by a new user message cancels only the parallel chat round,
+      // keeping any background production task running.
+      await abortSession(activeSessionId, "chat");
     }
     await sendMessage(activeSessionId, text, {
       activeBookId,
@@ -765,10 +775,15 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
   };
 
   const emptyGuidance = (() => {
+    if (genre) {
+      return isZh
+        ? `已为你装载【${genre}】专属题材规约与黄金节奏法则。告诉我你想写的核心构想、主角身份或开局危机，我们开始推演长篇草案。`
+        : `Active genre rules loaded for [${genre}]. Tell me your story core, protagonist, or opening conflict to begin.`;
+    }
     if (currentSessionKind === "short") {
       return isZh
-        ? "说一个短篇方向、标题灵感、人物压力或核心冲突，我会走 InkOS Short 生成正文、简介和封面。"
-        : "Describe a short-fiction direction, title hook, pressure, or core conflict to run InkOS Short.";
+        ? "说一个短篇方向、标题灵感、人物压力或核心冲突，我会走 Novel Creation Short 生成正文、简介和封面。"
+        : "Describe a short-fiction direction, title hook, pressure, or core conflict to run Novel Creation Short.";
     }
     if (currentSessionKind === "play") {
       return isZh
@@ -1140,6 +1155,17 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                   >
                     <Gamepad2 size={18} />
                     {isZh ? "查看世界" : "View World"}
+                  </button>
+                )}
+                {activeSessionId && (activeSession?.messages.length ?? 0) > 0 && !loading && (
+                  <button
+                    type="button"
+                    onClick={() => void rewindSession(activeSessionId)}
+                    className="ml-auto flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[15px] text-muted-foreground transition-colors hover:bg-muted hover:text-primary"
+                    title={isZh ? "撤销上一轮对话（含你的提问），重新发送" : "Rewind the last turn and retry"}
+                  >
+                    <RotateCcw size={15} />
+                    {isZh ? "回退上一轮" : "Rewind"}
                   </button>
                 )}
               </div>

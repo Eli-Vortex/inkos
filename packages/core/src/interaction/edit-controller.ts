@@ -1,11 +1,21 @@
-import { access, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import type { ChapterMeta } from "../models/chapter.js";
 import {
   archiveChapterVersion,
+  findChapterFile,
+  pruneChapterVersions,
   type ChapterVersionSource,
 } from "../state/chapter-workspace.js";
 import { classifyTruthAuthority, normalizeTruthFileName, type TruthAuthority } from "./truth-authority.js";
+import { defaultBlockingPolicy, type Finding } from "../findings/types.js";
+import { findingId } from "../findings/legacy.js";
+import { loadChapterFindings, saveChapterFindings } from "../state/chapter-findings-store.js";
+import { commitAtomicFileSet } from "../utils/atomic-file-set.js";
+import { escapeRegExp } from "../utils/escape-regexp.js";
+
+/** Policy version for findings written by a manual edit rather than an audit. */
+const MANUAL_EDIT_POLICY_VERSION = "manual-edit-v1";
 
 export type EditRequest =
   | {
@@ -137,9 +147,6 @@ export function planEditTransaction(request: EditRequest): PlannedEditTransactio
   }
 }
 
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 async function collectEditableFiles(dir: string): Promise<ReadonlyArray<string>> {
   const entries = await readdir(dir, { withFileTypes: true }).catch((error) => {
@@ -257,19 +264,52 @@ async function executeEntityRename(
 
 async function findChapterPath(root: string, chapterNumber: number): Promise<{ readonly chaptersDir: string; readonly chapterPath: string; readonly chapterFile: string }> {
   const chaptersDir = join(root, "chapters");
-  const paddedChapter = String(chapterNumber).padStart(4, "0");
-  const chapterFile = (await readdir(chaptersDir).catch((error) => {
-    if (isMissingDirectoryError(error)) {
-      return [];
-    }
-    throw error;
-  }))
-    .find((file) => file.startsWith(`${paddedChapter}_`) && file.endsWith(".md"));
-
+  // The shared locator, so the writer and every reader agree on which file a
+  // chapter is. Matching the name differently per call site is how a chapter
+  // ends up readable but not writable.
+  const chapterFile = await findChapterFile(root, chapterNumber);
   if (!chapterFile) {
     throw new Error(`Chapter ${chapterNumber} not found.`);
   }
   return { chaptersDir, chapterPath: join(chaptersDir, chapterFile), chapterFile };
+}
+
+/**
+ * Locate a chapter's file, or the path its first draft should be written to.
+ *
+ * A planned chapter has an index entry but no prose yet. Writing its first draft
+ * must target a new file rather than fail on "chapter not found", otherwise
+ * planning a chapter and then writing it — the documented order — is impossible.
+ *
+ * The file is NOT created here: creating an empty seed would make the caller
+ * archive a blank "previous version" into the history.
+ */
+async function findOrCreateChapterPath(
+  root: string,
+  chapterNumber: number,
+  seedText: string,
+): Promise<{ readonly chaptersDir: string; readonly chapterPath: string; readonly chapterFile: string; readonly created: boolean }> {
+  const existing = await findChapterFile(root, chapterNumber);
+  if (existing) {
+    return {
+      chaptersDir: join(root, "chapters"),
+      chapterPath: join(root, "chapters", existing),
+      chapterFile: existing,
+      created: false,
+    };
+  }
+
+  const chaptersDir = join(root, "chapters");
+  // Underscore separator: the canonical form the writer and every reader expect.
+  const padded = String(chapterNumber).padStart(4, "0");
+  const chapterFile = `${padded}_chapter.md`;
+  void seedText;
+  return {
+    chaptersDir,
+    chapterPath: join(chaptersDir, chapterFile),
+    chapterFile,
+    created: true,
+  };
 }
 
 async function clearChapterRuntimeFiles(root: string, chapterNumber: number): Promise<ReadonlyArray<string>> {
@@ -289,6 +329,14 @@ async function clearChapterRuntimeFiles(root: string, chapterNumber: number): Pr
   return runtimeFiles.map((file) => relative(root, join(runtimeDir, file)));
 }
 
+/**
+ * Mark a chapter as needing review, adding its index entry if it has none.
+ *
+ * This used to only update existing entries. A chapter whose prose exists but
+ * that is missing from the index — a first draft written straight into a new
+ * file, or an imported chapter — would then never appear in the book, while its
+ * file sat on disk.
+ */
 function markChapterForManualReview(
   index: ReadonlyArray<ChapterMeta>,
   chapterNumber: number,
@@ -296,18 +344,31 @@ function markChapterForManualReview(
   wordCount?: number,
 ): ReadonlyArray<ChapterMeta> {
   const now = new Date().toISOString();
-  return index.map((chapter) => chapter.number === chapterNumber
-    ? {
-        ...chapter,
-        status: "audit-failed" as const,
-        updatedAt: now,
-        ...(typeof wordCount === "number" ? { wordCount } : {}),
-        auditIssues: [
-          ...chapter.auditIssues.filter((existing) => !existing.includes(issue)),
-          `[warning] ${issue}`,
-        ],
-      }
-    : chapter);
+  const existing = index.find((chapter) => chapter.number === chapterNumber);
+  const base: ChapterMeta = existing ?? {
+    number: chapterNumber,
+    title: `第${chapterNumber}章`,
+    status: "audit-failed",
+    wordCount: 0,
+    createdAt: now,
+    updatedAt: now,
+    auditIssues: [],
+    lengthWarnings: [],
+  };
+
+  const reviewed: ChapterMeta = {
+    ...base,
+    status: "audit-failed",
+    updatedAt: now,
+    ...(typeof wordCount === "number" ? { wordCount } : {}),
+    auditIssues: [
+      ...base.auditIssues.filter((entry) => !entry.includes(issue)),
+      `[warning] ${issue}`,
+    ],
+  };
+
+  const others = index.filter((chapter) => chapter.number !== chapterNumber);
+  return [...others, reviewed].sort((left, right) => left.number - right.number);
 }
 
 function roughChapterLength(content: string): number {
@@ -323,20 +384,41 @@ async function executeChapterReplace(
   request: Extract<EditRequest, { kind: "chapter-replace" }>,
 ): Promise<ExecutedEditTransaction> {
   const root = deps.bookDir(request.bookId);
-  const fullText = request.fullText.trim();
-  if (!fullText) {
-    throw new Error("Chapter replacement requires fullText.");
+  // An empty body is a legitimate edit (the author cleared the chapter). The
+  // previous text is archived below, so it stays recoverable; only a missing
+  // string is invalid, and the HTTP layer already rejects that.
+  const fullText = request.fullText;
+  const { chaptersDir, chapterPath, chapterFile } = await findOrCreateChapterPath(root, request.chapterNumber, "");
+  await mkdir(chaptersDir, { recursive: true });
+  let previousContent: string | null = null;
+  try {
+    previousContent = await readFile(chapterPath, "utf-8");
+  } catch {
+    // Planned but never written: nothing to archive.
+    previousContent = null;
   }
-  const { chapterPath } = await findChapterPath(root, request.chapterNumber);
-  const previousContent = await readFile(chapterPath, "utf-8");
-  await archiveChapterVersion(
-    root,
-    request.chapterNumber,
-    previousContent,
-    request.versionSource ?? "agent",
-  );
-  await writeFile(chapterPath, fullText.endsWith("\n") ? fullText : `${fullText}\n`, "utf-8");
+  if (previousContent !== null) {
+    await archiveChapterVersion(
+      root,
+      request.chapterNumber,
+      previousContent,
+      request.versionSource ?? "agent",
+    );
+  }
+  // Staged + renamed rather than written in place: a concurrent reader (export,
+  // the chapter GET, another tab) must never observe a half-written chapter.
+  await commitAtomicFileSet({
+    rootDir: root,
+    writes: [{
+      relativePath: join("chapters", chapterFile),
+      content: fullText.endsWith("\n") ? fullText : `${fullText}\n`,
+    }],
+  });
   const removedRuntimeFiles = await clearChapterRuntimeFiles(root, request.chapterNumber);
+
+  // Autosave archives on every save; without pruning, one writing session
+  // buries the history list in near-identical full-text copies.
+  await pruneChapterVersions(root, request.chapterNumber);
 
   const updatedIndex = markChapterForManualReview(
     await deps.loadChapterIndex(request.bookId),
@@ -345,6 +427,7 @@ async function executeChapterReplace(
     roughChapterLength(fullText),
   );
   await deps.saveChapterIndex(request.bookId, updatedIndex);
+  await tryRecordManualReviewFinding(root, request.chapterNumber, "manual-replacement");
 
   return {
     transactionType: request.kind,
@@ -360,25 +443,92 @@ async function executeChapterReplace(
   };
 }
 
+/**
+ * Record the "this edit invalidated the review" note as a real finding.
+ *
+ * A manual save used to write only `[warning] …` into the chapter index, while
+ * the finding store kept whatever the last audit produced. The two then disagreed
+ * about the same chapter: the review view showed pre-edit findings and never the
+ * note explaining why the chapter needed re-review.
+ *
+ * The finding lives in the same per-chapter store as audit results, so the next
+ * audit replaces it rather than accumulating duplicates.
+ */
+async function recordManualReviewFinding(
+  bookDir: string,
+  chapterNumber: number,
+  trigger: "manual-replacement" | "manual-local-edit",
+): Promise<void> {
+  const rule = `state.${trigger}`;
+  const message = "本章正文在审核后被手动改动，原审核结论已不再适用。";
+  const finding: Finding = {
+    id: findingId({ source: "state", rule, chapterNumber, message }),
+    source: "state",
+    rule,
+    severity: "warning",
+    blocking: defaultBlockingPolicy("warning"),
+    scope: "chapter",
+    status: "open",
+    message,
+    suggestion: "重新审核本章；审计通过后再提交。",
+    evidence: { chapterNumber },
+    policyVersion: MANUAL_EDIT_POLICY_VERSION,
+    createdAt: new Date().toISOString(),
+  };
+
+  const existing = await loadChapterFindings(bookDir, chapterNumber);
+  const kept = (existing?.findings ?? []).filter((item) => item.rule !== rule);
+  await saveChapterFindings({
+    bookDir,
+    chapterNumber,
+    findings: [...kept, finding],
+  });
+}
+
+/**
+ * Best-effort wrapper around {@link recordManualReviewFinding}.
+ *
+ * The finding is a secondary record: the chapter prose has already been written
+ * and the index already updated by the time this runs. Letting a failure here
+ * propagate would report the whole save as failed while the text is safely on
+ * disk, which is worse than a missing review note.
+ */
+async function tryRecordManualReviewFinding(
+  bookDir: string,
+  chapterNumber: number,
+  trigger: "manual-replacement" | "manual-local-edit",
+): Promise<void> {
+  try {
+    await recordManualReviewFinding(bookDir, chapterNumber, trigger);
+  } catch {
+    // The index still carries the `[warning]` summary, so the chapter is not
+    // silently marked clean; only the structured copy is missing.
+  }
+}
+
 async function executeChapterLocalEdit(
   deps: EditExecutionDeps,
   request: Extract<EditRequest, { kind: "chapter-local-edit" }>,
 ): Promise<ExecutedEditTransaction> {
   const root = deps.bookDir(request.bookId);
-  const { chapterPath } = await findChapterPath(root, request.chapterNumber);
+  const { chapterFile } = await findChapterPath(root, request.chapterNumber);
   if (!request.targetText || request.replacementText === undefined) {
     throw new Error("Chapter-local edits require targetText and replacementText.");
   }
 
-  const content = await readFile(chapterPath, "utf-8");
+  const content = await readFile(join(root, "chapters", chapterFile), "utf-8");
   const nextContent = replaceChapterTargetText(content, request.targetText, request.replacementText);
   if (nextContent === content) {
     throw new Error(`Target text was not found in chapter ${request.chapterNumber}.`);
   }
   await archiveChapterVersion(root, request.chapterNumber, content, "agent");
-  await writeFile(chapterPath, nextContent, "utf-8");
+  await commitAtomicFileSet({
+    rootDir: root,
+    writes: [{ relativePath: join("chapters", chapterFile), content: nextContent }],
+  });
 
   const removedRuntimeFiles = await clearChapterRuntimeFiles(root, request.chapterNumber);
+  await pruneChapterVersions(root, request.chapterNumber);
   const updatedIndex = markChapterForManualReview(
     await deps.loadChapterIndex(request.bookId),
     request.chapterNumber,
@@ -386,13 +536,14 @@ async function executeChapterLocalEdit(
     roughChapterLength(nextContent),
   );
   await deps.saveChapterIndex(request.bookId, updatedIndex);
+  await tryRecordManualReviewFinding(root, request.chapterNumber, "manual-local-edit");
 
   return {
     transactionType: request.kind,
     bookId: request.bookId,
     chapterNumber: request.chapterNumber,
     touchedFiles: [
-      relative(root, chapterPath),
+      relative(root, join(root, "chapters", chapterFile)),
       ...removedRuntimeFiles,
       "chapters/index.json",
     ],
@@ -520,3 +671,8 @@ export async function executeEditTransaction(
       throw new Error(`Edit transaction "${request.kind}" is not executable yet.`);
   }
 }
+
+
+
+
+

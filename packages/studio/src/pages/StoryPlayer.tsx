@@ -1,6 +1,7 @@
 import { useMemo, useState, useCallback } from "react";
 import { useApi, buildApiUrl } from "../hooks/use-api";
 import { useColors } from "../hooks/use-colors";
+import { ErrorState, LoadingState } from "../components/ui/states";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { visibleChoices, applyEffects, initVarState, type VarState } from "@actalk/inkos-core/interactive-film/evaluator";
@@ -41,8 +42,8 @@ export function StoryPlayer({
     setStarted(true);
   }, [graph, startId]);
 
-  if (loading) return <div className={c.muted}>{t("common.loading")}</div>;
-  if (error) return <div className="text-destructive">{t("common.error")}: {error}</div>;
+  if (loading) return <LoadingState label={t("common.loading")} />;
+  if (error) return <ErrorState title={t("common.error")} message={error} />;
   if (!graph) return null;
 
   if (!started || !currentId) {

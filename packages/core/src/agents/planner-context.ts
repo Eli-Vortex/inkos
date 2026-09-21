@@ -31,10 +31,6 @@ export async function readEmotionalArcs(storyDir: string): Promise<string> {
   return readOrEmpty(join(storyDir, "emotional_arcs.md"));
 }
 
-export async function readBrief(storyDir: string): Promise<string> {
-  return readOrEmpty(join(storyDir, "brief.md"));
-}
-
 /**
  * Render the structured book rules (protagonist / prohibitions / genreLock /
  * behavioral constraints) as a compact markdown block for the planner prompt.

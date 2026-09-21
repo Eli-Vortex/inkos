@@ -4,6 +4,9 @@ import { join, resolve } from "node:path";
 import type { BookConfig } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
 import { bootstrapStructuredStateFromMarkdown, resolveDurableStoryProgress } from "./state-bootstrap.js";
+import { purgeChapterDerivedState } from "./chapter-derived-state.js";
+import { parseChapterFileNumber } from "./chapter-workspace.js";
+import { commitAtomicFileSet } from "../utils/atomic-file-set.js";
 
 const BOOK_LOCK_HEARTBEAT_MS = 30_000;
 const BOOK_LOCK_LEASE_MS = 3 * 60_000;
@@ -36,7 +39,7 @@ export class BookWriteLockError extends Error {
     lockData?: string,
   ) {
     super(
-      `Book "${bookId}" is locked by an active InkOS write${lockData ? ` (${lockData})` : ""}. ` +
+      `Book "${bookId}" is locked by an active Novel Creation write${lockData ? ` (${lockData})` : ""}. ` +
       "Wait for it to finish or stop the running task, then retry. Stale locks are recovered automatically.",
     );
     this.name = "BookWriteLockError";
@@ -216,6 +219,23 @@ export class StateManager {
       }
       throw error;
     }
+  }
+
+  /**
+   * Force-release a book's write lock.
+   *
+   * Normal release runs in the operation's finally. When an operation gets stuck
+   * (a hung upstream call keeps the await alive), the in-process lock stays held
+   * and every later write fails with BookWriteLockError. This is the escape
+   * hatch: drop the in-memory owner and remove the lock file.
+   */
+  async forceReleaseBookLock(bookId: string): Promise<void> {
+    const lockPath = join(this.bookDir(bookId), ".write.lock");
+    const lockKey = this.normalizeLockKey(lockPath);
+    const owner = processBookLocks.get(lockKey);
+    if (owner?.heartbeatTimer) clearInterval(owner.heartbeatTimer);
+    processBookLocks.delete(lockKey);
+    await this.unlinkWithRetry(lockPath).catch(() => undefined);
   }
 
   private normalizeLockKey(lockPath: string): string {
@@ -404,12 +424,12 @@ export class StateManager {
   }
 
   async saveBookConfigAt(bookDir: string, config: BookConfig): Promise<void> {
-    await mkdir(bookDir, { recursive: true });
-    await writeFile(
-      join(bookDir, "book.json"),
-      JSON.stringify(config, null, 2),
-      "utf-8",
-    );
+    // Atomic write: a crash mid-write used to leave a truncated book.json whose
+    // parse error made the whole book unreadable.
+    await commitAtomicFileSet({
+      rootDir: bookDir,
+      writes: [{ relativePath: "book.json", content: JSON.stringify(config, null, 2) }],
+    });
   }
 
   async ensureRuntimeState(bookId: string, fallbackChapter = 0): Promise<void> {
@@ -422,17 +442,17 @@ export class StateManager {
   async listBooks(): Promise<ReadonlyArray<string>> {
     try {
       const entries = await readdir(this.booksDir);
-      const bookIds: string[] = [];
-      for (const entry of entries) {
-        const bookJsonPath = join(this.booksDir, entry, "book.json");
+      // Probe candidates in parallel: the sequential loop was O(books) serial
+      // stat round-trips on every library load.
+      const results = await Promise.all(entries.map(async (entry) => {
         try {
-          await stat(bookJsonPath);
-          bookIds.push(entry);
+          await stat(join(this.booksDir, entry, "book.json"));
+          return entry;
         } catch {
-          // not a book directory
+          return null;
         }
-      }
-      return bookIds;
+      }));
+      return results.filter((entry): entry is string => entry !== null);
     } catch {
       return [];
     }
@@ -452,6 +472,18 @@ export class StateManager {
     return durableChapter + 1;
   }
 
+  /**
+   * Durable chapter progress without bootstrapping the markdown state.
+   *
+   * `getNextChapterNumber` also creates/bootstraps the structured state JSON;
+   * that side effect (and its manifest write) is wasted work for read-only list
+   * views, which only need the progress number. Write paths still use
+   * `getNextChapterNumber`/`ensureRuntimeState`.
+   */
+  async getDurableStoryProgress(bookId: string): Promise<number> {
+    return resolveDurableStoryProgress({ bookDir: this.bookDir(bookId) });
+  }
+
   async getPersistedChapterCount(bookId: string): Promise<number> {
     const chaptersDir = join(this.bookDir(bookId), "chapters");
     const chapterNumbers = new Set<number>();
@@ -459,9 +491,10 @@ export class StateManager {
     try {
       const files = await readdir(chaptersDir);
       for (const file of files) {
-        const match = file.match(/^(\d+)_.*\.md$/);
-        if (!match) continue;
-        chapterNumbers.add(parseInt(match[1]!, 10));
+        // Same matcher as the locator/rollback: the underscore-only version
+        // undercounted hyphenated (hand-authored/imported) chapters.
+        const number = parseChapterFileNumber(file);
+        if (number !== null) chapterNumbers.add(number);
       }
     } catch {
       return 0;
@@ -542,16 +575,15 @@ export class StateManager {
     index: ReadonlyArray<ChapterMeta>,
     options: { readonly allowEmptyWithChapterFiles?: boolean } = {},
   ): Promise<void> {
-    const chaptersDir = join(bookDir, "chapters");
-    await mkdir(chaptersDir, { recursive: true });
     const safeIndex = index.length === 0 && !options.allowEmptyWithChapterFiles
       ? await this.rebuildChapterIndexFromFilesAt(bookDir).then((rebuilt) => rebuilt.length > 0 ? rebuilt : index)
       : index;
-    await writeFile(
-      join(chaptersDir, "index.json"),
-      JSON.stringify(safeIndex, null, 2),
-      "utf-8",
-    );
+    // Atomic write: a truncated index.json loses every chapter's status, title
+    // and telemetry (the rebuild fallback replaces them with bare stubs).
+    await commitAtomicFileSet({
+      rootDir: bookDir,
+      writes: [{ relativePath: join("chapters", "index.json"), content: JSON.stringify(safeIndex, null, 2) }],
+    });
   }
 
   async snapshotState(bookId: string, chapterNumber: number): Promise<void> {
@@ -738,11 +770,16 @@ export class StateManager {
       }
     }
 
-    // Delete chapter markdown files for discarded chapters
+    // Delete chapter markdown files for discarded chapters.
+    //
+    // Both separators must match: the writer produces `NNNN_title.md`, but
+    // hand-authored/imported chapters use `NNNN-title.md` and are accepted by the
+    // shared locator. Matching only the underscore form left the hyphen file on
+    // disk, and the empty-index rebuild below then resurrected the deleted chapter.
     try {
       const files = await readdir(chaptersDir);
       for (const file of files) {
-        const match = file.match(/^(\d+)_.*\.md$/);
+        const match = file.match(/^(\d+)[_-].*\.md$/);
         if (!match) continue;
         const num = parseInt(match[1]!, 10);
         if (num > targetChapter) {
@@ -788,7 +825,7 @@ export class StateManager {
     try {
       const draftFiles = await readdir(draftsDir);
       for (const file of draftFiles) {
-        const match = file.match(/^(\d+)_.*\.md$/);
+        const match = file.match(/^(\d+)[_-].*\.md$/);
         if (!match) continue;
         const num = parseInt(match[1]!, 10);
         if (num > targetChapter) {
@@ -807,6 +844,14 @@ export class StateManager {
       rm(join(bookDir, "story", "memory.db-wal"), { force: true }),
     ]);
 
+    // Findings and version archives are keyed only by chapter number, so they
+    // outlive a rollback and would be inherited by whatever chapter is written
+    // at that number next. The runtime sweep above happens to cover the approval
+    // file; these two are not covered by it.
+    for (const chapterNumber of discarded) {
+      await purgeChapterDerivedState(bookDir, chapterNumber);
+    }
+
     await this.saveChapterIndex(bookId, kept);
     return discarded;
   }
@@ -819,3 +864,4 @@ export class StateManager {
     }
   }
 }
+

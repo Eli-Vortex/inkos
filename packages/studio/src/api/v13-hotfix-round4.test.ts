@@ -33,6 +33,8 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     async loadBookConfig(): Promise<never> { throw new Error("not implemented"); }
     async loadChapterIndex(): Promise<[]> { return []; }
     async getNextChapterNumber(): Promise<number> { return 1; }
+    async getDurableStoryProgress(): Promise<number> { return 0; }
+    async acquireBookLock(): Promise<() => Promise<void>> { return async () => {}; }
     bookDir(id: string): string { return join(this.root, "books", id); }
   }
   class MockPipelineRunner {

@@ -1,8 +1,30 @@
 /*
-  InkOS Studio — Atmospheric Literary Workbench
-  Fonts: Instrument Serif (Headings/Literary), DM Sans (UI), JetBrains Mono (Data)
+  Novel Creation Studio - shared visual system
+  ────────────────────────────────────────────────────────────────────────────
+  THE single source of truth for the whole Studio front end.
+
+  The palette below was lifted out of src/workbench/theme.css so that the
+  authoring workbench and the rest of Studio share one design language instead
+  of two. Rules for this file:
+
+    · every literal colour, duration and radius in the app is declared here,
+      exactly once, on :root and .dark;
+    · the canonical names are --nc-*; the shadcn variables (--background,
+      --card, --primary, …) are aliases onto them, so Tailwind utilities and
+      component code both read the same values;
+    · src/workbench/theme.css is now an alias layer only — it must not
+      re-declare a literal.
+
+  Grounds (calibrated independently for each theme):
+    light — warm paper ivory #FBF9F5 with high-contrast ink #2D3748
+    dark  — deep charcoal #0D1117 with frosted translucent #161B22 panels
+
+  Accents are used only where they carry meaning:
+    朱砂 cinnabar  #B3382C  destructive / blocking / draft
+    克莱因蓝 klein #1B3FA6  primary action / focus / selection
+    琥珀金 amber   #8A5A08  warning / the commit seal
+    松石玉 jade    #1F7A5C  success / published / committed
 */
-@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500&display=swap');
 
 @import "tailwindcss";
 
@@ -11,6 +33,9 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* ── Tailwind theme bridge ─────────────────────────────────────────────────
+   Every entry here is an alias; no literal lives in this block. Adding a
+   --color-* name gives Tailwind a matching utility (bg-*, text-*, border-*). */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -32,100 +57,301 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
 
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  /* semantic status families — use these instead of emerald/amber/red slate */
+  --color-panel: var(--nc-panel);
+  --color-panel-2: var(--nc-panel-2);
+  --color-sunken: var(--nc-sunken);
+  --color-paper: var(--nc-paper);
+  --color-hairline: var(--nc-hairline);
+  --color-border-strong: var(--nc-border-strong);
+  --color-primary-soft: var(--nc-primary-soft);
+  --color-success: var(--nc-ok);
+  --color-success-soft: var(--nc-ok-soft);
+  --color-warning: var(--nc-warn);
+  --color-warning-soft: var(--nc-warn-soft);
+  --color-info: var(--nc-info);
+  --color-info-soft: var(--nc-info-soft);
+  --color-seal: var(--nc-seal);
+  --color-seal-soft: var(--nc-seal-soft);
+  --color-seal-foreground: var(--nc-seal-fg);
+  --color-block: var(--nc-block);
+  --color-block-soft: var(--nc-block-soft);
 
-  --font-serif: 'Instrument Serif', Georgia, serif;
-  --font-sans: 'DM Sans', system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
+  /* one radius ladder, two names for it: shadcn's --radius-* and the
+     workbench's --nc-r-*. `rounded-lg` is the control radius everywhere. */
+  --radius-sm: var(--nc-r-xs);
+  --radius-md: var(--nc-r-sm);
+  --radius-lg: var(--nc-r-md);
+  --radius-xl: var(--nc-r-lg);
 
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-  --shadow-soft: 0 2px 15px -3px oklch(0 0 0 / 0.07), 0 4px 6px -4px oklch(0 0 0 / 0.05);
-  --shadow-3d: 0 10px 30px -10px oklch(0 0 0 / 0.15), 0 4px 10px -5px oklch(0 0 0 / 0.1);
-  --shadow-3d-hover: 0 20px 40px -15px oklch(0 0 0 / 0.2), 0 8px 16px -8px oklch(0 0 0 / 0.15);
+  --font-serif: 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'SimSun', Georgia, serif;
+  --font-sans: 'Geist Variable', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
+  /* Display face for Chinese headings uses local system fonts so the local app
+     never stalls on a third-party font CDN. */
+  --font-display-cjk: 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'SimSun', serif;
+
+  --shadow-sm: var(--nc-shadow-1);
+  --shadow-md: var(--nc-shadow-2);
+  --shadow-lg: var(--nc-shadow-3);
+  --shadow-soft: var(--nc-shadow-2);
+  --shadow-3d: var(--nc-shadow-2);
+  --shadow-3d-hover: var(--nc-shadow-3);
 }
 
-/* ── Light Mode: Warm Parchment & Ink ── */
+/* ══════════════════════════════════════════════════════════════════════════
+   LIGHT — one flat white ground, ink, and hairlines
+   ══════════════════════════════════════════════════════════════════════════ */
 :root {
-  --radius: 0.6rem;
+  /* ── grounds ─────────────────────────────────────────────────────────── */
+  /* One white for the whole app: shell, sidebar, cards and the prose page.
+     Structure comes from hairlines and spacing, not from a second tone. */
+  --nc-bg: #ffffff;
+  --nc-bg-radial: #ffffff;
 
-  /* Background: Warm, aged paper with subtle radial light */
-  --background: oklch(0.985 0.005 80);
-  --background-radial: radial-gradient(circle at 50% 0%, oklch(0.995 0.002 85) 0%, oklch(0.985 0.005 80) 100%);
-  --foreground: oklch(0.13 0.02 60);
+  /* Reserved for interaction feedback only (hover, selected, sunken wells). */
+  --nc-panel: #f6f6f8;
+  --nc-panel-2: #efeff2;
+  --nc-card: #ffffff;
+  --nc-sunken: #f4f4f6;
+  /* the floating page the prose sits on */
+  --nc-paper: #ffffff;
 
-  /* Cards: Crisp sheets on paper */
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.15 0.015 60);
+  /* No frosted tint: glass surfaces resolve to the same white ground. */
+  --nc-glass: #ffffff;
+  --nc-glass-panel: #ffffff;
+  --nc-glass-blur: 0px;
 
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.15 0.015 60);
+  /* ── ink ─────────────────────────────────────────────────────────────── */
+  --nc-fg: #1f2733;
+  --nc-fg-muted: #59616f;
+  --nc-fg-subtle: #7a828e;
+  --nc-card-fg: #1f2733;
 
-  /* Primary: Deep Oxblood / Ink */
-  --primary: oklch(0.45 0.12 25);
-  --primary-foreground: oklch(0.98 0.006 76);
+  /* ── hairlines ───────────────────────────────────────────────────────── */
+  --nc-border: #e7e7ec;
+  --nc-border-strong: #d5d6dc;
+  --nc-hairline: color-mix(in srgb, var(--nc-border) 70%, transparent);
 
-  /* Secondary: Soft paper shadow */
-  --secondary: oklch(0.94 0.01 76);
-  --secondary-foreground: oklch(0.25 0.015 60);
+  /* ── accents ─────────────────────────────────────────────────────────── */
+  /* 克莱因蓝 — primary action, focus, active selection */
+  --nc-primary: #1b3fa6;
+  --nc-primary-fg: #ffffff;
+  --nc-primary-soft: #e7ecfb;
+  --nc-primary-hover: #16307f;
+  --nc-primary-ring: color-mix(in srgb, var(--nc-primary) 28%, transparent);
 
-  /* Muted: Faded ink */
-  --muted: oklch(0.94 0.008 76);
-  --muted-foreground: oklch(0.38 0.02 60);
+  /* 琥珀金 — the commit seal, approvals, warnings */
+  --nc-seal: #8a5a08;
+  --nc-seal-soft: #fbf0d8;
+  --nc-seal-fg: #ffffff;
+  --nc-seal-ring: color-mix(in srgb, var(--nc-seal) 30%, transparent);
 
-  /* Accent: Subtle gold leaf */
-  --accent: oklch(0.92 0.02 85);
-  --accent-foreground: oklch(0.25 0.05 60);
+  /* 朱砂 — blocking findings, drafts, destructive actions */
+  --nc-block: #b3382c;
+  --nc-block-soft: #fbe9e6;
+  --nc-block-fg: #7a2318;
+  --nc-block-on: #ffffff;
 
-  --destructive: oklch(0.55 0.18 25);
-  --destructive-foreground: oklch(0.98 0 0);
+  --nc-accent: #f4f4f5;
+  --nc-accent-fg: #3f3f46;
 
-  --border: oklch(0.84 0.01 76);
-  --input: oklch(0.92 0.005 76);
-  --ring: oklch(0.45 0.12 25);
+  /* status family */
+  --nc-ok: #1f7a5c;
+  --nc-ok-soft: #e1f2ec;
+  --nc-warn: #8a5a08;
+  --nc-warn-soft: #fbf0d8;
+  --nc-info: #46527a;
+  --nc-info-soft: #ebedf6;
+
+  /* draft / unpublished — deliberately quiet so it never shouts */
+  --nc-draft: #8a6a3c;
+  --nc-draft-soft: #f6efe2;
+
+  --nc-focus: var(--nc-primary);
+  --nc-scrim: rgb(24 32 46 / 0.37);
+
+  /* ── elevation ───────────────────────────────────────────────────────── */
+  --nc-shadow-1: 0 1px 2px rgb(20 28 44 / 0.05), 0 1px 3px rgb(20 28 44 / 0.04);
+  --nc-shadow-2: 0 10px 30px -12px rgb(20 28 44 / 0.16), 0 3px 10px -4px rgb(20 28 44 / 0.07);
+  --nc-shadow-3: 0 26px 60px -24px rgb(20 28 44 / 0.26), 0 8px 20px -8px rgb(20 28 44 / 0.10);
+  --nc-inset: inset 0 1px 0 rgb(255 255 255 / 0.7);
+
+  /* ── type ────────────────────────────────────────────────────────────── */
+  --nc-text-xs: 11px;
+  --nc-text-sm: 12.5px;
+  --nc-text-md: 13.5px;
+  --nc-text-lg: 15px;
+  --nc-display-sm: 17px;
+  --nc-display-md: 22px;
+  --nc-display-lg: 28px;
+
+  /* the writing canvas — 760–840px is the flow band the brief asks for */
+  --nc-prose-w: 780px;
+  --nc-prose-size: 17.5px;
+  --nc-prose-lh: 1.8;
+  --nc-prose-gap: 1.05em;
+
+  /* ── spacing (4/8 rhythm) ────────────────────────────────────────────── */
+  --nc-s1: 4px;
+  --nc-s2: 8px;
+  --nc-s3: 12px;
+  --nc-s4: 16px;
+  --nc-s5: 20px;
+  --nc-s6: 24px;
+  --nc-s8: 32px;
+  --nc-s10: 40px;
+  --nc-s12: 48px;
+  --nc-s16: 64px;
+
+  /* ── radii ───────────────────────────────────────────────────────────── */
+  --nc-r-xs: 6px;
+  --nc-r-sm: 8px;
+  --nc-r-md: 10px;
+  --nc-r-lg: 14px;
+  --nc-r-pill: 999px;
+
+  /* ── motion ──────────────────────────────────────────────────────────── */
+  --nc-dur-1: 150ms;
+  --nc-dur-2: 200ms;
+  --nc-dur-3: 240ms;
+  --nc-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --nc-ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --nc-stagger: 35ms;
+
+  /* ── shell metrics ───────────────────────────────────────────────────── */
+  --nc-nav-w: 232px;
+  --nc-nav-w-collapsed: 64px;
+  --nc-tree-w: 252px;
+  --nc-review-w: 360px;
+  --nc-topbar-h: 56px;
+
+  --nc-grain-opacity: 0.028;
+  --nc-grain-blend: multiply;
+
+  /* ── shadcn aliases ──────────────────────────────────────────────────── */
+  --radius: var(--nc-r-md);
+
+  --background: var(--nc-bg);
+  --background-radial: var(--nc-bg-radial);
+  --foreground: var(--nc-fg);
+
+  --card: var(--nc-card);
+  --card-foreground: var(--nc-card-fg);
+  --popover: var(--nc-card);
+  --popover-foreground: var(--nc-card-fg);
+
+  --primary: var(--nc-primary);
+  --primary-foreground: var(--nc-primary-fg);
+
+  --secondary: var(--nc-panel-2);
+  --secondary-foreground: var(--nc-fg);
+
+  --muted: var(--nc-panel);
+  --muted-foreground: var(--nc-fg-muted);
+
+  --accent: var(--nc-accent);
+  --accent-foreground: var(--nc-accent-fg);
+
+  --destructive: var(--nc-block);
+  --destructive-foreground: var(--nc-block-on);
+
+  --border: var(--nc-border);
+  --input: var(--nc-border);
+  --ring: var(--nc-focus);
+
+  --success: var(--nc-ok);
+  --success-soft: var(--nc-ok-soft);
+  --warning: var(--nc-warn);
+  --warning-soft: var(--nc-warn-soft);
+  --info: var(--nc-info);
+  --info-soft: var(--nc-info-soft);
+  --seal: var(--nc-seal);
+  --seal-soft: var(--nc-seal-soft);
+  --seal-foreground: var(--nc-seal-fg);
 }
 
-/* ── Dark Mode: Obsidian & Candlelight ── */
+/* ══════════════════════════════════════════════════════════════════════════
+   DARK — one flat charcoal ground
+   ══════════════════════════════════════════════════════════════════════════ */
 .dark {
-  /* Background: Deep obsidian with soft top glow */
-  --background: oklch(0.12 0.01 250);
-  --background-radial: radial-gradient(circle at 50% 0%, oklch(0.16 0.015 250) 0%, oklch(0.12 0.01 250) 100%);
-  --foreground: oklch(0.97 0.005 250);
+  /* ── grounds ─────────────────────────────────────────────────────────── */
+  /* Mirror of light: one ground tone everywhere, panels only for feedback. */
+  --nc-bg: #0d1117;
+  --nc-bg-radial: #0d1117;
 
-  /* Cards: Floating graphite */
-  --card: oklch(0.18 0.015 250);
-  --card-foreground: oklch(0.95 0.005 250);
+  --nc-panel: #161b22;
+  --nc-panel-2: #1c2128;
+  --nc-card: #0d1117;
+  --nc-sunken: #161b22;
+  --nc-paper: #0d1117;
 
-  --popover: oklch(0.18 0.015 250);
-  --popover-foreground: oklch(0.95 0.005 250);
+  --nc-glass: #0d1117;
+  --nc-glass-panel: #0d1117;
+  --nc-glass-blur: 0px;
 
-  /* Primary: Warm Amber / Candlelight */
-  --primary: oklch(0.78 0.14 85);
-  --primary-foreground: oklch(0.12 0.01 250);
+  /* ── ink ─────────────────────────────────────────────────────────────── */
+  --nc-fg: #e6edf3;
+  --nc-fg-muted: #9ba6b2;
+  --nc-fg-subtle: #7d8794;
+  --nc-card-fg: #e6edf3;
 
-  /* Secondary: Dark slate */
-  --secondary: oklch(0.22 0.02 250);
-  --secondary-foreground: oklch(0.92 0.005 250);
+  /* ── hairlines ───────────────────────────────────────────────────────── */
+  --nc-border: #30363d;
+  --nc-border-strong: #444c56;
+  --nc-hairline: color-mix(in srgb, var(--nc-border) 72%, transparent);
 
-  /* Muted: Dimmed graphite */
-  --muted: oklch(0.22 0.015 250);
-  --muted-foreground: oklch(0.78 0.005 250);
+  /* ── accents ─────────────────────────────────────────────────────────── */
+  --nc-primary: #7aa2ff;
+  --nc-primary-fg: #0d1117;
+  --nc-primary-soft: #16223a;
+  --nc-primary-hover: #9cb9ff;
+  --nc-primary-ring: color-mix(in srgb, var(--nc-primary) 34%, transparent);
 
-  /* Accent: Muted gold */
-  --accent: oklch(0.28 0.04 85);
-  --accent-foreground: oklch(0.95 0.06 85);
+  --nc-seal: #e0b44a;
+  --nc-seal-soft: #35290f;
+  --nc-seal-fg: #2a1c03;
+  --nc-seal-ring: color-mix(in srgb, var(--nc-seal) 34%, transparent);
 
-  --destructive: oklch(0.55 0.2 25);
-  --destructive-foreground: oklch(0.98 0 0);
+  --nc-block: #e5534b;
+  --nc-block-soft: #351714;
+  --nc-block-fg: #f7c9c5;
+  --nc-block-on: #2a0f0c;
 
-  --border: oklch(0.30 0.02 250);
-  --input: oklch(0.25 0.02 250);
-  --ring: oklch(0.78 0.14 85);
+  --nc-accent: #21262d;
+  --nc-accent-fg: #d9c48a;
+
+  --nc-ok: #57bfa0;
+  --nc-ok-soft: #102b24;
+  --nc-warn: #e0b44a;
+  --nc-warn-soft: #33280f;
+  --nc-info: #93a6d6;
+  --nc-info-soft: #1a2231;
+
+  --nc-draft: #c9a26b;
+  --nc-draft-soft: #2b2418;
+
+  --nc-focus: var(--nc-primary);
+  --nc-scrim: rgb(2 5 10 / 0.62);
+
+  /* ── elevation ───────────────────────────────────────────────────────── */
+  --nc-shadow-1: 0 1px 2px rgb(0 0 0 / 0.5), 0 1px 3px rgb(0 0 0 / 0.4);
+  --nc-shadow-2: 0 12px 32px -12px rgb(0 0 0 / 0.66), 0 4px 12px -4px rgb(0 0 0 / 0.5);
+  --nc-shadow-3: 0 28px 68px -24px rgb(0 0 0 / 0.76), 0 10px 24px -8px rgb(0 0 0 / 0.55);
+  --nc-inset: inset 0 1px 0 rgb(255 255 255 / 0.04);
+
+  --nc-grain-opacity: 0.02;
+  --nc-grain-blend: overlay;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   BASE
+   ══════════════════════════════════════════════════════════════════════════ */
+@layer base {
+  * { border-color: var(--border); }
+}
+
+html, body { height: 100%; }
 
 body {
   font-family: var(--font-sans);
@@ -134,16 +360,18 @@ body {
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background: var(--background-radial);
-  background-attachment: fixed;
+  background-color: var(--background);
+  background-image: none;
   color: var(--foreground);
-  transition: background 0.5s ease, color 0.5s ease;
+  transition: background-color var(--nc-dur-3) var(--nc-ease-out), color var(--nc-dur-3) var(--nc-ease-out);
 }
 
+::selection { background: color-mix(in srgb, var(--nc-primary) 24%, transparent); color: var(--foreground); }
+
 /* ── UI readability scale ──
-   Studio uses many Tailwind small-text utilities for dense panels. Raise the
-   common small sizes globally so the whole app reads one step larger without
-   touching layout spacing or display headings. */
+   Studio uses many Tailwind small-text utilities for dense panels. These keep
+   the app reading one step larger without touching layout spacing or display
+   headings. They are load-bearing: changing a value here shifts every page. */
 .text-xs { font-size: 0.8125rem; line-height: 1.15rem; }
 .text-sm { font-size: 0.9375rem; line-height: 1.45rem; }
 .text-base { font-size: 1.0625rem; line-height: 1.6rem; }
@@ -163,107 +391,107 @@ button:disabled, [aria-disabled="true"] { cursor: not-allowed; }
 input[type="text"], input[type="number"], input[type="email"], input[type="password"], textarea { cursor: text; }
 input[type="checkbox"], input[type="radio"] { cursor: pointer; }
 
-/* Button hover micro-feedback */
-button:not(:disabled):active {
-  transform: scale(0.97);
-  transition: transform 0.1s ease;
-}
+/* Press feedback: a hair of surface settle, not a scale jump (which reads
+   cheap on dense toolbars and conflicts with the inset highlight). */
+button:not(:disabled):active { transform: translateY(0.5px); transition: transform var(--nc-dur-1) var(--nc-ease-out); }
 
-/* Subtle grain texture for physical feel */
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 50;
-  opacity: 0.035;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
-  mix-blend-mode: overlay;
-}
+/* No grain overlay: the surface is a flat white ground by design. */
 
-/* Serif headings with literary character */
+/* Serif headings with literary character.
+   No global italic: CJK has no true italic, so browsers synthesise a slanted
+   fake that reads as broken next to the sans body text. Latin-only display
+   text opts into italic explicitly (e.g. the sidebar wordmark). */
 h1, h2, h3, h4 {
   font-family: var(--font-serif);
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   font-weight: 500;
 }
 
-h1 { font-size: 2.25rem; font-style: italic; }
+h1 { font-size: 2.25rem; }
 h2 { font-size: 1.75rem; }
 h3 { font-size: 1.25rem; }
 
-/* Focus indicator */
+/* Focus indicator — one ring rule for the whole app */
 :focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
 
 /* Custom Scrollbar */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 10px;
+  background: color-mix(in srgb, var(--nc-fg-subtle) 38%, transparent);
+  border: 3px solid transparent;
+  border-radius: var(--nc-r-pill);
+  background-clip: content-box;
 }
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--muted-foreground);
-}
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--nc-fg-subtle) 60%, transparent); background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+* { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--nc-fg-subtle) 42%, transparent) transparent; }
 
 /* ── Animation Classes ── */
-.fade-in {
-  animation: fadeIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-}
+.fade-in { animation: fadeIn var(--nc-dur-3) var(--nc-ease-out) forwards; }
 
-.stagger-1 { animation-delay: 0.05s; opacity: 0; }
-.stagger-2 { animation-delay: 0.1s; opacity: 0; }
-.stagger-3 { animation-delay: 0.15s; opacity: 0; }
-.stagger-4 { animation-delay: 0.2s; opacity: 0; }
-.stagger-5 { animation-delay: 0.25s; opacity: 0; }
+.stagger-1 { animation-delay: 35ms; opacity: 0; }
+.stagger-2 { animation-delay: 70ms; opacity: 0; }
+.stagger-3 { animation-delay: 105ms; opacity: 0; }
+.stagger-4 { animation-delay: 140ms; opacity: 0; }
+.stagger-5 { animation-delay: 175ms; opacity: 0; }
 
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(8px); }
+  from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
-/* ── Premium Layout Utilities ── */
+/* ── Shared surface utilities ── */
 .glass-panel {
-  backdrop-blur: 16px;
-  background-color: color-mix(in oklch, var(--card) 70%, transparent);
-  border: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
-  box-shadow: var(--shadow-3d);
+  backdrop-filter: blur(var(--nc-glass-blur)) saturate(1.15);
+  -webkit-backdrop-filter: blur(var(--nc-glass-blur)) saturate(1.15);
+  background-color: var(--nc-glass-panel);
+  border: 1px solid var(--nc-hairline);
+  box-shadow: var(--nc-shadow-2);
 }
 
 .paper-sheet {
   background-color: var(--card);
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow-md);
-  transition: box-shadow 0.3s cubic-bezier(0.16, 1, 0.3, 1),
-              border-color 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  border: 1px solid var(--nc-hairline);
+  border-radius: var(--nc-r-md);
+  box-shadow: var(--nc-shadow-1);
+  transition: box-shadow var(--nc-dur-2) var(--nc-ease-out), border-color var(--nc-dur-2) var(--nc-ease-out);
 }
 
 .paper-sheet:hover {
-  box-shadow: var(--shadow-3d-hover);
-  border-color: var(--primary);
+  box-shadow: var(--nc-shadow-2);
+  border-color: var(--border);
 }
+
+/* ── Section / page chrome shared by every page ──────────────────────────
+   The same three shapes the workbench uses, promoted so the whole Studio can
+   read identically. Components in src/components/ui/states.tsx build on them. */
+.nc-section-title {
+  font-family: var(--nc-font-display, var(--font-serif));
+  font-size: var(--nc-display-sm);
+  letter-spacing: 0;
+}
+
+.nc-surface {
+  background: var(--card);
+  border: 1px solid var(--nc-hairline);
+  border-radius: var(--nc-r-md);
+  box-shadow: var(--nc-shadow-1);
+}
+
+.nc-hairline { border-color: var(--nc-hairline); }
 
 /* ── ChatPanel Animations ── */
 
-/* Header sparkle glow pulse */
 @keyframes iconGlow {
   0%, 100% { filter: drop-shadow(0 0 0px transparent); }
-  50% { filter: drop-shadow(0 0 6px oklch(0.78 0.14 85 / 0.4)); }
+  50% { filter: drop-shadow(0 0 6px color-mix(in srgb, var(--nc-primary) 40%, transparent)); }
 }
 .chat-icon-glow { animation: iconGlow 2s ease-in-out infinite; }
 
-/* Writing pen gentle bobbing */
 @keyframes iconWrite {
   0%, 100% { transform: translateY(0) rotate(0deg); }
   25% { transform: translateY(-1px) rotate(-3deg); }
@@ -271,50 +499,43 @@ h3 { font-size: 1.25rem; }
 }
 .chat-icon-write { animation: iconWrite 1.2s ease-in-out infinite; }
 
-/* Slow spin for revision/wrench */
 @keyframes spinSlow {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
 .chat-icon-spin-slow { animation: spinSlow 3s linear infinite; }
 
-/* Pop-in for success checkmark */
 @keyframes iconPop {
   0% { transform: scale(0); opacity: 0; }
   60% { transform: scale(1.2); }
   100% { transform: scale(1); opacity: 1; }
 }
-.chat-icon-pop { animation: iconPop 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+.chat-icon-pop { animation: iconPop 0.4s var(--nc-ease-out) forwards; }
 
-/* Shake for trash icon hover */
 @keyframes shake {
   0%, 100% { transform: translateX(0); }
   25% { transform: translateX(-2px) rotate(-5deg); }
   75% { transform: translateX(2px) rotate(5deg); }
 }
 
-/* Message slide-in from right (user) */
 @keyframes msgSlideRight {
   from { opacity: 0; transform: translateX(12px); }
   to { opacity: 1; transform: translateX(0); }
 }
-.chat-msg-user { animation: msgSlideRight 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+.chat-msg-user { animation: msgSlideRight var(--nc-dur-3) var(--nc-ease-out) forwards; }
 
-/* Message slide-in from left (assistant) */
 @keyframes msgSlideLeft {
   from { opacity: 0; transform: translateX(-12px); }
   to { opacity: 1; transform: translateX(0); }
 }
-.chat-msg-assistant { animation: msgSlideLeft 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+.chat-msg-assistant { animation: msgSlideLeft var(--nc-dur-3) var(--nc-ease-out) forwards; }
 
-/* Thinking breathing glow */
 @keyframes thinkGlow {
-  0%, 100% { box-shadow: 0 0 0 0 oklch(0.78 0.14 85 / 0); }
-  50% { box-shadow: 0 0 12px 2px oklch(0.78 0.14 85 / 0.15); }
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--nc-primary) 0%, transparent); }
+  50% { box-shadow: 0 0 12px 2px color-mix(in srgb, var(--nc-primary) 15%, transparent); }
 }
 .chat-thinking-glow { animation: thinkGlow 2s ease-in-out infinite; }
 
-/* Typing wave for dots */
 @keyframes typingWave {
   0%, 60%, 100% { transform: translateY(0); }
   30% { transform: translateY(-6px); }
@@ -323,10 +544,8 @@ h3 { font-size: 1.25rem; }
 .chat-typing-dot:nth-child(2) { animation-delay: 0.15s; }
 .chat-typing-dot:nth-child(3) { animation-delay: 0.3s; }
 
-/* Panel slide transition */
 .chat-panel-enter {
-  transition: width 300ms cubic-bezier(0.16, 1, 0.3, 1),
-              opacity 200ms ease-out;
+  transition: width 300ms var(--nc-ease-out), opacity var(--nc-dur-2) var(--nc-ease-out);
 }
 
 /* ── Streamdown overrides ── */
@@ -337,4 +556,13 @@ h3 { font-size: 1.25rem; }
 }
 [data-streamdown="table-wrapper"] > .flex.items-center.justify-end {
   display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

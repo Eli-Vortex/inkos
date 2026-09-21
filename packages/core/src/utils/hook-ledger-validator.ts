@@ -1,3 +1,5 @@
+import { escapeRegExp as escapeRegex } from "./escape-regexp.js";
+
 /**
  * Phase 9-3: hard gate that a chapter draft actually acts on the hook ledger
  * the planner declared in the memo's "## 本章 hook 账" / "## Hook ledger for
@@ -265,9 +267,6 @@ function dedupeStrings(values: ReadonlyArray<string>): string[] {
   return [...new Set(values)];
 }
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 export const INTERNAL = {
   SUBSECTION_KEYS,

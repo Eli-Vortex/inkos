@@ -8,7 +8,7 @@ import {
   runWithAgentTrajectoryRole,
 } from "../llm/agent-trajectory.js";
 
-describe("InkOS agent trajectory metadata", () => {
+describe("Novel Creation agent trajectory metadata", () => {
   it("uses an opaque stable conversation id", () => {
     const first = opaqueConversationId("session-with-user-visible-name");
     expect(first).toBe(opaqueConversationId("session-with-user-visible-name"));

@@ -29,6 +29,7 @@ import {
   readChapterVersion,
   saveChapterUserBrief,
 } from "../state/chapter-workspace.js";
+import { readChapterFindings } from "../state/chapter-findings-store.js";
 
 const require = createRequire(import.meta.url);
 const hasNodeSqlite = (() => {
@@ -1402,7 +1403,7 @@ describe("PipelineRunner", () => {
         kind: "long-fiction",
         status: "needs-review",
         stage: "chapter-1",
-        skillIds: ["inkos-long-writing"],
+        skillIds: ["novel-creation-long-writing"],
       });
       expect(run.artifacts).toEqual(expect.arrayContaining([
         expect.stringMatching(/^chapters\/0001_/),
@@ -4677,7 +4678,9 @@ describe("PipelineRunner", () => {
   });
 
   it("passes merged AI-tell issues into manual revise and rejects no-improvement revisions", async () => {
-    const { root, runner, state, bookId } = await createRunnerFixture();
+    // Pinned to "strict" explicitly: the project default is now "lenient", so a
+    // no-improvement revision would otherwise be applied.
+    const { root, runner, state, bookId } = await createRunnerFixture({ revisionGate: "strict" });
     const storyDir = join(state.bookDir(bookId), "story");
     const chaptersDir = join(state.bookDir(bookId), "chapters");
     const originalBody = "林越抬手。林越停步。林越转身。林越侧耳。";
@@ -4923,7 +4926,7 @@ describe("PipelineRunner", () => {
   }, SLOW_PIPELINE_TEST_TIMEOUT_MS);
 
   it("applies a no-improvement manual revision when revisionGate is lenient", async () => {
-    const { root, runner, bookId, chaptersDir, revisedBody } = await createRevisionGateFixture("lenient");
+    const { root, runner, state, bookId, chaptersDir, revisedBody } = await createRevisionGateFixture("lenient");
 
     // Same warning before and after: strict would reject (no improvement),
     // lenient applies because nothing worsened.
@@ -4938,6 +4941,15 @@ describe("PipelineRunner", () => {
       expect(result.applied).toBe(true);
       expect(result.skippedReason).toBeUndefined();
       expect(savedChapter).toContain(revisedBody);
+
+      // The revision's post-audit findings must reach the structured store that
+      // the commit gate reads, not just the index summary.
+      const stored = await readChapterFindings({
+        bookDir: state.bookDir(bookId),
+        chapterNumber: 1,
+      });
+      expect(stored.findings.length).toBeGreaterThan(0);
+      expect(stored.findings[0]?.message).toContain("结尾解释略多");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -5071,7 +5083,9 @@ describe("PipelineRunner", () => {
       await expect(readFile(join(storyDir, "current_state.md"), "utf-8")).resolves.toBe(latestState);
       await expect(readFile(join(storyDir, "pending_hooks.md"), "utf-8")).resolves.toBe(latestHooks);
       expect(savedIndex[0]?.status).toBe("ready-for-review");
-      expect(savedIndex[1]?.status).toBe("needs-revision");
+      // A rewritten earlier chapter invalidates the downstream audit, so the
+      // downstream chapter must be re-reviewed before it can be committed.
+      expect(savedIndex[1]?.status).toBe("audit-failed");
       expect(snapshotState).not.toHaveBeenCalled();
     } finally {
       await rm(root, { recursive: true, force: true });

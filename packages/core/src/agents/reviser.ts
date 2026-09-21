@@ -279,12 +279,16 @@ ${sanitizeNarrativeEvidenceBlock(hookDebtBlock, resolvedLanguage) ?? ""}${saniti
 ## 待修正章节
 ${chapterContent}`;
 
+    // A revision is a bounded artifact (one chapter). Do not auto-continue past
+    // an output-limit cut: stitching segments would turn a runaway rewrite into
+    // tens of thousands of unusable characters. Surface the cut so the caller
+    // can retry or keep the original chapter instead.
     const response = await this.chat(
       [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      { temperature: 0.3 },
+      { temperature: 0.3, continuation: false },
     );
 
     const output = this.parseOutput(

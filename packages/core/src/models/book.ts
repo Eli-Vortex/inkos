@@ -103,5 +103,5 @@ export function resolveRevisionGate(
   book: Pick<BookConfig, "writing">,
   projectWriting?: { readonly revisionGate?: RevisionGate },
 ): RevisionGate {
-  return book.writing?.revisionGate ?? projectWriting?.revisionGate ?? "strict";
+  return book.writing?.revisionGate ?? projectWriting?.revisionGate ?? "lenient";
 }

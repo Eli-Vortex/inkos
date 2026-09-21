@@ -4,6 +4,7 @@ import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
 import { fetchJson } from "../hooks/use-api";
 import { TrendingUp, Loader2, Target, Clock } from "lucide-react";
+import { ErrorState } from "../components/ui/states";
 
 interface Recommendation {
   readonly confidence: number;
@@ -85,9 +86,7 @@ export function RadarView({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunct
         </button>
       </div>
 
-      {error && (
-        <div className="bg-destructive/10 text-destructive px-4 py-3 rounded-lg text-sm">{error}</div>
-      )}
+      {error && <ErrorState title={t("common.error")} message={error} />}
 
       {result && (
         <div className="space-y-6">
@@ -104,8 +103,8 @@ export function RadarView({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunct
                     {rec.platform} · {rec.genre}
                   </span>
                   <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-                    rec.confidence >= 0.7 ? "bg-emerald-500/10 text-emerald-600" :
-                    rec.confidence >= 0.4 ? "bg-amber-500/10 text-amber-600" :
+                    rec.confidence >= 0.7 ? "bg-success-soft text-success" :
+                    rec.confidence >= 0.4 ? "bg-warning-soft text-warning" :
                     "bg-muted text-muted-foreground"
                   }`}>
                     {(rec.confidence * 100).toFixed(0)}%

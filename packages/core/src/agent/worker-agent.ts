@@ -25,6 +25,7 @@ import { isLlmStubEnabled, stubChatCompletion } from "./llm-stub.js";
 export interface WorkerAgentOptions {
   readonly temperature?: number;
   readonly maxTokens?: number;
+  readonly continuation?: boolean;
   readonly webSearch?: boolean;
   readonly onStreamProgress?: OnStreamProgress;
   readonly onTextDelta?: (text: string) => void;
@@ -156,11 +157,11 @@ function combineSignals(primary: AbortSignal | undefined, secondary: AbortSignal
 }
 
 /**
- * Pi stream adapter backed by the existing InkOS provider boundary.
+ * Pi stream adapter backed by the existing Novel Creation provider boundary.
  *
  * Pi owns the worker lifecycle and cancellation. The provider remains the sole
  * transport implementation so custom endpoints, retries, context guards and
- * stream deadlines behave exactly like the rest of InkOS.
+ * stream deadlines behave exactly like the rest of Novel Creation.
  */
 function providerWorkerStream(
   client: LLMClient,
@@ -194,6 +195,7 @@ function providerWorkerStream(
         const response = await chatCompletion(client, model.id, contextMessages(context), {
           ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
           ...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
+          ...(options.continuation !== undefined ? { continuation: options.continuation } : {}),
           ...(options.webSearch !== undefined ? { webSearch: options.webSearch } : {}),
           ...(options.onStreamProgress ? { onStreamProgress: options.onStreamProgress } : {}),
           onTextDelta: emitDelta,

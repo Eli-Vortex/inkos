@@ -25,6 +25,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./findings": {
+      "types": "./dist/findings/index.d.ts",
+      "import": "./dist/findings/index.js"
+    },
     "./interactive-film/evaluator": {
       "types": "./dist/interactive-film/evaluator.d.ts",
       "import": "./dist/interactive-film/evaluator.js"

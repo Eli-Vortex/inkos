@@ -14,6 +14,7 @@ import type {
 } from "@mariozechner/pi-ai";
 import { resolveServicePreset } from "./service-presets.js";
 import { getEndpoint } from "./providers/index.js";
+import { resolveProviderCompat } from "./provider-compat.js";
 import { lookupModel } from "./providers/lookup.js";
 import { fetchWithProxy } from "../utils/proxy-fetch.js";
 import { isApiKeyOptionalForEndpoint } from "../utils/llm-endpoint-auth.js";
@@ -36,13 +37,21 @@ export interface StreamProgress {
 
 export type OnStreamProgress = (progress: StreamProgress) => void;
 
-const INKOS_USER_AGENT = "InkOS/1.3.5";
+const INKOS_USER_AGENT = "Novel Creation/1.3.5";
 const UNKNOWN_MODEL_FALLBACK_MAX_TOKENS = 8192 * 3;
-const TRANSIENT_LLM_RETRIES = 2;
+const TRANSIENT_LLM_RETRIES = 3;
 const DEFAULT_FIRST_STREAM_EVENT_TIMEOUT_MS = 120_000;
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 90_000;
 const DEFAULT_PIPELINE_FIRST_STREAM_EVENT_TIMEOUT_MS = 300_000;
 const DEFAULT_PIPELINE_STREAM_IDLE_TIMEOUT_MS = 180_000;
+// How many times we re-ask the model to continue after an output-limit cut.
+const MAX_OUTPUT_CONTINUATIONS = 4;
+// Hard ceiling on stitched content so a runaway/repetition loop cannot keep the
+// continuation going forever (a bounded chapter rewrite pins maxTokens and never
+// enters this path at all).
+const MAX_CONTINUATION_TOTAL_CHARS = 60_000;
+const OUTPUT_CONTINUATION_PROMPT =
+  "上次输出因长度上限被截断。请从中断处直接继续，不要重复已经输出的内容，也不要重新开头或加任何前言说明，只输出后续部分。";
 
 export interface StreamDeadlineOptions {
   readonly firstEventTimeoutMs?: number;
@@ -381,17 +390,6 @@ function resolvePiApi(
   return (presetApi ?? "openai-completions") as PiApi;
 }
 
-function resolveProviderCompat(
-  provider: ReturnType<typeof getEndpoint>,
-  baseUrl: string,
-): Record<string, unknown> | undefined {
-  const compat = {
-    ...(provider?.compat ?? {}),
-    ...(baseUrl.includes("generativelanguage.googleapis.com") ? { supportsStore: false } : {}),
-  };
-  return Object.keys(compat).length > 0 ? compat : undefined;
-}
-
 function parseEnvHeaders(): Record<string, string> | undefined {
   const raw = process.env.INKOS_LLM_HEADERS;
   if (!raw) return undefined;
@@ -443,10 +441,10 @@ export class ContextWindowExceededError extends Error {
     readonly model: string;
   }) {
     super(
-      `InkOS context window guard: estimated input ${params.estimatedInputTokens} tokens + ` +
+      `Novel Creation context window guard: estimated input ${params.estimatedInputTokens} tokens + ` +
       `reserved output ${params.reservedOutputTokens} tokens exceeds context window ${params.contextWindow} ` +
       `for model "${params.model}". Please compress the active book/session context before retrying; ` +
-      `InkOS will not truncate semantic text automatically.`,
+      `Novel Creation will not truncate semantic text automatically.`,
     );
     this.name = "ContextWindowExceededError";
     this.estimatedInputTokens = params.estimatedInputTokens;
@@ -736,6 +734,10 @@ export function isTransientLLMHttpError(error: unknown): boolean {
     "service unavailable",
     "bad gateway",
     "gateway timeout",
+    // nginx renders its own error page as "504 Gateway Time-out" (hyphenated);
+    // without this the HTML body would only match via the bare numeric status.
+    "gateway time-out",
+    "gateway time out",
     "too many requests",
     "rate limit",
     "overloaded",
@@ -754,10 +756,23 @@ function isIncompleteLLMResponseError(error: unknown): boolean {
 function isRetryableLLMError(error: unknown): boolean {
   // PartialResponseError = 流在生成中途被掐断（网关切长连接等）。重试会完整
   // 重新生成一次，比把半截内容当成功交付（截断的章节/设定文件）要正确。
-  return error instanceof PartialResponseError
+  // Output-limit truncation is NOT retried here: re-asking with the same
+  // budget just truncates again. chatCompletion continues the generation
+  // instead (see the continuation loop there).
+  return (error instanceof PartialResponseError && error.reason !== "output-limit")
     || isIncompleteLLMResponseError(error)
     || isTransientLLMTransportError(error)
     || isTransientLLMHttpError(error);
+}
+
+/**
+ * Whether a failure is the model hitting its output ceiling. Callers use this
+ * to choose between continuing/retrying and a graceful fallback.
+ */
+export function isOutputLimitError(error: unknown): boolean {
+  if (error instanceof PartialResponseError) return error.reason === "output-limit";
+  const text = collectErrorText(error).toLowerCase();
+  return text.includes("output limit") || text.includes("reached the output");
 }
 
 async function withTransientLLMRetry<T>(
@@ -780,7 +795,7 @@ async function withTransientLLMRetry<T>(
         throw error;
       }
       // Back off before retrying — immediate re-fire on a 429/503 just makes it
-      // worse. Linear is enough for a 2-retry budget (~0.8s, ~1.6s).
+      // worse. Linear is enough for a small retry budget (~0.8s, ~1.6s).
       await abortableDelay(800 * (attempt + 1), options?.signal);
     }
   }
@@ -1447,6 +1462,10 @@ export async function chatCompletion(
     // Diagnostics / connectivity checks want a fast pass-or-fail — set false to
     // skip the transient 502/503/429 retry+backoff (e.g. the doctor probe).
     readonly retry?: boolean;
+    // Bounded artifacts (one chapter rewrite, a patch set) must be a single
+    // response; continuing past the output ceiling would stitch a runaway mess.
+    // Set false so an output-limit cut surfaces to the caller instead.
+    readonly continuation?: boolean;
   },
 ): Promise<LLMResponse> {
   if (isLlmStubEnabled()) return Promise.resolve(stubChatCompletion(messages, model));
@@ -1466,9 +1485,8 @@ export async function chatCompletion(
   const errorCtx = { baseUrl: client._piModel?.baseUrl ?? "(unknown)", model, service: client.service };
   const modelCall = beginAgentModelCall();
 
-  try {
-    return await withTransientLLMRetry(
-      async (attempt) => {
+  const runOnce = (conversation: ReadonlyArray<LLMMessage>) => withTransientLLMRetry(
+    async (attempt) => {
         signal?.throwIfAborted();
         const traceHeaders = agentTrajectoryHeaders(client._piModel?.baseUrl, modelCall, attempt, {
           effort: client.defaults.thinkingBudget > 0 ? "enabled" : "disabled",
@@ -1495,7 +1513,7 @@ export async function chatCompletion(
         assertWithinContextWindow({
           piModel: resolvePiModel(client, model),
           model,
-          estimatedInputTokens: estimateLLMMessagesTokens(messages),
+          estimatedInputTokens: estimateLLMMessagesTokens(conversation),
           reservedOutputTokens: resolved.maxTokens,
         });
         try {
@@ -1503,7 +1521,7 @@ export async function chatCompletion(
             return await chatCompletionViaCustomOpenAICompatible(
               client,
               model,
-              messages,
+              conversation,
               resolved,
               onStreamProgress,
               onTextDelta,
@@ -1515,7 +1533,7 @@ export async function chatCompletion(
           return await chatCompletionViaPiAi(
             client,
             model,
-            messages,
+            conversation,
             resolved,
             onStreamProgress,
             onTextDelta,
@@ -1532,12 +1550,56 @@ export async function chatCompletion(
       // Retrying after UI text deltas have been emitted can duplicate visible
       // text; callers can also opt out (e.g. fast-fail diagnostics).
       { enabled: (options?.retry ?? true) && !onTextDelta, signal },
-    );
-  } catch (error) {
-    // 注意：中断的流（PartialResponseError）不再"打捞"半截内容当成功返回——
-    // 那会产出写到一半就结束的章节/设定文件。重试由 withTransientLLMRetry
-    // 负责（完整重新生成）；重试耗尽后如实抛错。
-    throw wrapLLMError(error, errorCtx);
+  );
+
+  // When the model hits its output ceiling mid-generation, re-ask it to continue
+  // from the cut point and stitch the segments. A 700-chapter foundation/outline
+  // is far longer than any single max_tokens, and providers enforce a hard cap,
+  // so continuing is the only way it completes instead of aborting the build.
+  // Skipped while streaming deltas to the UI: a continuation would replay text.
+  // Default: continue past an output-limit cut by stitching segments (needed by
+  // long additive generation such as a 700-chapter foundation). Callers that
+  // must produce one bounded artifact (a chapter revision) pass
+  // `continuation: false`, and a pinned maxTokens also opts out.
+  const canContinue = options?.continuation !== false
+    && options?.retry !== false
+    && options?.maxTokens === undefined
+    && !signal?.aborted;
+  let conversation: LLMMessage[] = [...messages];
+  let accumulated = "";
+  let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+
+  for (let segment = 0; ; segment += 1) {
+    try {
+      const response = await runOnce(conversation);
+      accumulated += response.content;
+      usage = {
+        promptTokens: usage.promptTokens + response.usage.promptTokens,
+        completionTokens: usage.completionTokens + response.usage.completionTokens,
+        totalTokens: usage.totalTokens + response.usage.totalTokens,
+      };
+      return { content: accumulated, usage };
+    } catch (error) {
+      const partial = error instanceof PartialResponseError ? error : undefined;
+      if (
+        !canContinue
+        || !partial
+        || partial.reason !== "output-limit"
+        || !partial.partialContent
+        || segment >= MAX_OUTPUT_CONTINUATIONS
+        || accumulated.length + partial.partialContent.length > MAX_CONTINUATION_TOTAL_CHARS
+      ) {
+        // 中断的流不再"打捞"半截内容当成功返回——那会产出写到一半就结束的
+        // 章节/设定文件。重试由 withTransientLLMRetry 负责；继续成功不了就如实抛错。
+        throw wrapLLMError(error, errorCtx);
+      }
+      accumulated += partial.partialContent;
+      conversation = [
+        ...messages,
+        { role: "assistant", content: accumulated },
+        { role: "user", content: OUTPUT_CONTINUATION_PROMPT },
+      ];
+    }
   }
 }
 

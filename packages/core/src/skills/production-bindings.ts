@@ -2,14 +2,14 @@ import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
 import type { AgentSkill } from "./types.js";
 
 export const PRODUCTION_SKILL_IDS = {
-  longWriting: ["inkos-long-writing"],
-  longReview: ["inkos-long-writing", "inkos-story-review"],
-  shortWriting: ["inkos-short-writing"],
-  play: ["inkos-play-world"],
-  script: ["inkos-script-writing"],
-  storyboard: ["inkos-storyboard"],
-  interactiveFilm: ["inkos-interactive-film"],
-  translation: ["inkos-translation"],
+  longWriting: ["novel-creation-long-writing"],
+  longReview: ["novel-creation-long-writing", "novel-creation-story-review"],
+  shortWriting: ["novel-creation-short-writing"],
+  play: ["novel-creation-play-world"],
+  script: ["novel-creation-script-writing"],
+  storyboard: ["novel-creation-storyboard"],
+  interactiveFilm: ["novel-creation-interactive-film"],
+  translation: ["novel-creation-translation"],
 } as const;
 
 export type ProductionSkillCapability = keyof typeof PRODUCTION_SKILL_IDS;

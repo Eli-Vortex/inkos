@@ -8,7 +8,7 @@ import { join } from "node:path";
 const PID_FILE = "inkos.pid";
 
 export const upCommand = new Command("up")
-  .description("Start the InkOS daemon (autonomous mode)")
+  .description("Start the Novel Creation daemon (autonomous mode)")
   .option("-q, --quiet", "Suppress console output")
   .action(async (opts) => {
     let logStream: WriteStream | undefined;
@@ -27,7 +27,7 @@ export const upCommand = new Command("up")
         // No PID file, good
       }
 
-      log("Starting InkOS daemon...");
+      log("Starting Novel Creation daemon...");
       log(`  Write cycle: ${config.daemon.schedule.writeCron}`);
       log(`  Radar scan: ${config.daemon.schedule.radarCron}`);
       log(`  Max concurrent books: ${config.daemon.maxConcurrentBooks}`);
@@ -101,7 +101,7 @@ export const upCommand = new Command("up")
   });
 
 export const downCommand = new Command("down")
-  .description("Stop the InkOS daemon")
+  .description("Stop the Novel Creation daemon")
   .action(async () => {
     const root = findProjectRoot();
     const pidPath = join(root, PID_FILE);

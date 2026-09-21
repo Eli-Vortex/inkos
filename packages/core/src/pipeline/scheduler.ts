@@ -5,6 +5,7 @@ import type { BookConfig } from "../models/book.js";
 import type { QualityGates, DetectionConfig } from "../models/project.js";
 import { dispatchWebhookEvent } from "../notify/dispatcher.js";
 import { detectChapter, detectAndRewrite } from "./detection-runner.js";
+import { findChapterFile } from "../state/chapter-workspace.js";
 import type { Logger } from "../utils/logger.js";
 
 export interface SchedulerConfig extends PipelineConfig {
@@ -366,12 +367,10 @@ export class Scheduler {
   }
 
   private async readChapterContent(bookDir: string, chapterNumber: number): Promise<string> {
-    const { readFile, readdir } = await import("node:fs/promises");
+    const { readFile } = await import("node:fs/promises");
     const { join } = await import("node:path");
     const chaptersDir = join(bookDir, "chapters");
-    const files = await readdir(chaptersDir);
-    const paddedNum = String(chapterNumber).padStart(4, "0");
-    const chapterFile = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
+    const chapterFile = await findChapterFile(bookDir, chapterNumber);
     if (!chapterFile) {
       throw new Error(`Chapter ${chapterNumber} file not found in ${chaptersDir}`);
     }

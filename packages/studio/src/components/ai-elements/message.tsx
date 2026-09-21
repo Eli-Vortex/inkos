@@ -37,8 +37,8 @@ export type MessageProps = HTMLAttributes<HTMLDivElement> & {
 export const Message = ({ className, from, ...props }: MessageProps) => (
   <div
     className={cn(
-      "group flex w-full max-w-[95%] flex-col gap-2",
-      from === "user" ? "is-user ml-auto items-end" : "is-assistant items-start",
+      "group flex w-full flex-col gap-2 transition-all",
+      from === "user" ? "is-user ml-auto items-end max-w-[85%]" : "is-assistant items-start max-w-full",
       className
     )}
     {...props}
@@ -54,9 +54,9 @@ export const MessageContent = ({
 }: MessageContentProps) => (
   <div
     className={cn(
-      "is-user:dark flex w-fit min-w-0 max-w-full flex-col gap-2 overflow-hidden text-base",
-      "group-[.is-user]:ml-auto group-[.is-user]:rounded-lg group-[.is-user]:bg-secondary group-[.is-user]:px-4 group-[.is-user]:py-3 group-[.is-user]:text-foreground",
-      "group-[.is-assistant]:text-foreground",
+      "flex min-w-0 flex-col gap-2 text-[15px]",
+      "group-[.is-user]:ml-auto group-[.is-user]:rounded-2xl group-[.is-user]:bg-secondary/70 group-[.is-user]:border group-[.is-user]:border-border/60 group-[.is-user]:px-4 group-[.is-user]:py-2.5 group-[.is-user]:text-foreground group-[.is-user]:shadow-2xs",
+      "group-[.is-assistant]:w-full group-[.is-assistant]:text-foreground",
       className
     )}
     {...props}
@@ -327,7 +327,19 @@ export const MessageResponse = memo(
   ({ className, ...props }: MessageResponseProps) => (
     <Streamdown
       className={cn(
-        "size-full text-[17px] leading-[1.72] font-['SimSun','Songti_SC','STSong',serif] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&>p+p]:mt-4",
+        "size-full text-[14.5px] sm:text-[15px] leading-[1.75] text-foreground font-sans tracking-normal",
+        "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+        "[&>p]:my-2.5 [&>p]:leading-relaxed",
+        "[&>h1]:text-xl [&>h1]:font-bold [&>h1]:mt-5 [&>h1]:mb-2.5 [&>h1]:font-sans [&>h1]:tracking-tight",
+        "[&>h2]:text-lg [&>h2]:font-bold [&>h2]:mt-4.5 [&>h2]:mb-2 [&>h2]:font-sans [&>h2]:tracking-tight",
+        "[&>h3]:text-[15.5px] [&>h3]:font-bold [&>h3]:mt-3.5 [&>h3]:mb-1.5 [&>h3]:font-sans",
+        "[&>ul]:my-2.5 [&>ul]:list-disc [&>ul]:pl-5 [&>ul]:space-y-1",
+        "[&>ol]:my-2.5 [&>ol]:list-decimal [&>ol]:pl-5 [&>ol]:space-y-1",
+        "[&>li]:leading-relaxed",
+        "[&>blockquote]:border-l-2 [&>blockquote]:border-primary/50 [&>blockquote]:bg-secondary/15 [&>blockquote]:py-1 [&>blockquote]:pl-3.5 [&>blockquote]:text-muted-foreground [&>blockquote]:my-3 [&>blockquote]:rounded-r-lg",
+        "[&_code]:rounded-md [&_code]:bg-secondary/70 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[12.5px] [&_code]:border [&_code]:border-border/50",
+        "[&_pre]:my-3 [&_pre]:rounded-xl [&_pre]:border [&_pre]:border-border/60 [&_pre]:bg-secondary/20 [&_pre]:p-3.5",
+        "[&_hr]:my-4 [&_hr]:border-border/50",
         className
       )}
       plugins={streamdownPlugins}

@@ -98,7 +98,10 @@ export type FoundationConfig = z.infer<typeof FoundationConfigSchema>;
 export const WritingConfigSchema = z.object({
   reviewRetries: z.number().int().min(0).max(10).default(1),
   reviewMode: z.enum(["auto", "manual"]).default("auto"),
-  revisionGate: z.enum(["strict", "lenient", "always"]).default("strict"),
+  // Manual revisions are user-initiated; default to "lenient" so a polish or
+  // rewrite actually applies when it does not worsen the audit. "strict"
+  // silently discarded revisions of already-clean chapters.
+  revisionGate: z.enum(["strict", "lenient", "always"]).default("lenient"),
 });
 
 export type WritingConfig = z.infer<typeof WritingConfigSchema>;

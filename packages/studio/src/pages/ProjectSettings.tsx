@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Bell, Bot, FileText, FolderUp, MessageSquare, Radar, RotateCcw, Search, Settings2, Plus, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Bell, Bot, FileText, FolderUp, MessageSquare, Radar, RotateCcw, Search, Settings2, Plus, Trash2, X } from "lucide-react";
 import { fetchJson, postApi, putApi, useApi } from "../hooks/use-api";
 import { usePreferencesStore } from "../store/preferences";
 import type { Theme } from "../hooks/use-theme";
@@ -110,10 +110,31 @@ export function ProjectSettings({ nav, theme, t }: { nav: Nav; theme: Theme; t: 
   const [promptDraft, setPromptDraft] = useState("");
   const [notice, setNotice] = useState<{ tone: NoticeTone; message: string } | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
+  const [skillFolder, setSkillFolder] = useState("");
+  const [skillQuery, setSkillQuery] = useState("");
+  const [skillFilter, setSkillFilter] = useState<"all" | "writing" | "project" | "user">("all");
   const skillFolderInputRef = useRef<HTMLInputElement>(null);
   const toolDetailsDefaultOpen = usePreferencesStore((s) => s.toolDetailsDefaultOpen);
   const setToolDetailsDefaultOpen = usePreferencesStore((s) => s.setToolDetailsDefaultOpen);
   const skills = skillsData?.skills ?? [];
+  const filteredSkills = useMemo<StudioSkill[]>(() => {
+    const q = skillQuery.trim().toLowerCase();
+    return skills.filter((s: StudioSkill) => {
+      if (skillFilter === "writing" && !s.id.startsWith("story-") && !s.id.startsWith("inkos-")) {
+        return false;
+      }
+      if (skillFilter === "project" && s.source !== "project") {
+        return false;
+      }
+      if (skillFilter === "user" && s.source !== "user") {
+        return false;
+      }
+      if (q && !s.name.toLowerCase().includes(q) && !s.id.toLowerCase().includes(q) && !s.description?.toLowerCase().includes(q)) {
+        return false;
+      }
+      return true;
+    });
+  }, [skills, skillQuery, skillFilter]);
   const promptGroups = groupPromptPacksForDisplay(promptPacksData ?? { packs: [], prompts: [] });
   const promptList = promptPacksData?.prompts ?? [];
   const selectedPrompt = promptList.find((prompt) => prompt.id === selectedPromptId) ?? null;
@@ -218,7 +239,7 @@ export function ProjectSettings({ nav, theme, t }: { nav: Nav; theme: Theme; t: 
               ? "bg-destructive/10 text-destructive"
               : notice.tone === "info"
                 ? "bg-secondary text-muted-foreground"
-                : "bg-emerald-500/10 text-emerald-600"
+                : "bg-success-soft text-success"
           }`}
         >
           {notice.message}
@@ -245,7 +266,7 @@ export function ProjectSettings({ nav, theme, t }: { nav: Nav; theme: Theme; t: 
       >
         <div className="space-y-3">
           {skillsData?.diagnostics?.length ? (
-            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+            <div className="rounded-xl border border-warning/35 bg-warning-soft px-3 py-2 text-xs text-warning dark:text-warning">
               <div className="font-semibold">{isZh ? "部分外部 Skill 未加载" : "Some external skills were not loaded"}</div>
               {skillsData.diagnostics.slice(0, 8).map((item, index) => (
                 <div key={`${item.path ?? "skill"}-${index}`} className="mt-1 break-all">
@@ -286,22 +307,83 @@ export function ProjectSettings({ nav, theme, t }: { nav: Nav; theme: Theme; t: 
               }}
             />
           </div>
+          {/* ── Skills Filter Toolbar ── */}
+          {skills.length > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-border/50 bg-secondary/10 px-3 py-2">
+              <div className="flex flex-wrap items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setSkillFilter("all")}
+                  className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                    skillFilter === "all" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-secondary"
+                  }`}
+                >
+                  {isZh ? "全部" : "All"} ({skills.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSkillFilter("writing")}
+                  className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                    skillFilter === "writing" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-secondary"
+                  }`}
+                >
+                  {isZh ? "写作技能" : "Writing"} (
+                  {skills.filter((s) => s.id.startsWith("story-") || s.id.startsWith("inkos-")).length}
+                  )
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSkillFilter("project")}
+                  className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                    skillFilter === "project" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-secondary"
+                  }`}
+                >
+                  {isZh ? "项目专属" : "Project"} (
+                  {skills.filter((s) => s.source === "project").length}
+                  )
+                </button>
+              </div>
+
+              <div className="relative flex min-w-[200px] flex-1 sm:max-w-[260px] items-center">
+                <Search size={13} className="absolute left-2.5 text-muted-foreground/60" />
+                <input
+                  type="text"
+                  value={skillQuery}
+                  onChange={(e) => setSkillQuery(e.target.value)}
+                  placeholder={isZh ? "搜索技能名称或 ID..." : "Search skills..."}
+                  className="w-full rounded-lg border border-border/60 bg-background py-1.5 pl-8 pr-7 text-xs outline-none focus:border-primary/60"
+                />
+                {skillQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSkillQuery("")}
+                    className="absolute right-2 text-muted-foreground hover:text-foreground"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           {skills.length === 0 ? (
             <p className="text-xs text-muted-foreground italic">{isZh ? "还没有 Skill。" : "No skills yet."}</p>
           ) : (
-            <div className="grid gap-2 md:grid-cols-2">
-              {skills.map((skill) => (
-                <div key={skill.id} className="rounded-xl border border-border/60 bg-secondary/20 p-3">
+            <div className="grid gap-2 md:grid-cols-2 max-h-[440px] overflow-y-auto pr-1">
+              {filteredSkills.map((skill: StudioSkill) => (
+                <div key={skill.id} className="rounded-xl border border-border/60 bg-secondary/20 p-2.5 hover:border-primary/30 transition-colors">
                   <div className="flex items-start gap-2">
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <div className="truncate text-sm font-semibold">{skill.name}</div>
-                        <span className="rounded-full bg-background px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                      <div className="flex items-center gap-1.5">
+                        <div className="truncate text-xs font-bold text-foreground">{skill.name}</div>
+                        <span className="rounded bg-background px-1.5 py-0.2 text-[9.5px] uppercase font-mono tracking-wider text-muted-foreground border border-border/40">
                           {skill.source ?? "skill"}
                         </span>
                       </div>
-                      <div className="mt-0.5 font-mono text-[11px] text-muted-foreground/70">@{skill.id}</div>
-                      <p className="mt-1 text-xs leading-5 text-muted-foreground">{skill.description || (isZh ? "无说明" : "No description")}</p>
+                      <div className="mt-0.5 font-mono text-[10.5px] text-muted-foreground/70">@{skill.id}</div>
+                      <p className="mt-1 text-xs leading-relaxed text-muted-foreground/90 line-clamp-2" title={skill.description}>
+                        {skill.description || (isZh ? "无说明" : "No description")}
+                      </p>
                     </div>
                     {skill.editable ? (
                       <button
@@ -313,12 +395,17 @@ export function ProjectSettings({ nav, theme, t }: { nav: Nav; theme: Theme; t: 
                         className="shrink-0 rounded-lg p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
                         aria-label={isZh ? `删除 ${skill.name}` : `Delete ${skill.name}`}
                       >
-                        <Trash2 size={14} />
+                        <Trash2 size={13} />
                       </button>
                     ) : null}
                   </div>
                 </div>
               ))}
+              {filteredSkills.length === 0 && (
+                <div className="col-span-2 py-8 text-center text-xs text-muted-foreground">
+                  {isZh ? "未找到匹配的 Skill" : "No matching skills found"}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -336,10 +423,10 @@ export function ProjectSettings({ nav, theme, t }: { nav: Nav; theme: Theme; t: 
                 {isZh ? "没有可编辑提示词。" : "No prompt packs available."}
               </p>
             ) : (
-              <div className="space-y-4">
+              <div className="max-h-[520px] space-y-4 overflow-y-auto pr-1">
                 {promptGroups.map((group) => (
                   <div key={group.id} className="space-y-2">
-                    <div>
+                    <div className="sticky top-0 z-1 rounded-md bg-secondary/40 px-1.5 py-1 backdrop-blur-sm">
                       <div className="text-xs font-bold uppercase tracking-wide text-muted-foreground">{group.title}</div>
                       {group.description ? (
                         <p className="mt-1 text-[11px] leading-4 text-muted-foreground/80">{group.description}</p>

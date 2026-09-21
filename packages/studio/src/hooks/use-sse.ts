@@ -48,7 +48,9 @@ export const STUDIO_SSE_EVENTS = [
   "fanfic:refresh:start",
   "fanfic:refresh:complete",
   "fanfic:refresh:error",
-  "draft:delta",
+  // `draft:delta` is intentionally NOT here: it fires per token and is consumed
+  // by the per-session chat stream. Keeping it on the app-root SSE store
+  // re-rendered the entire routed tree on every token of every session.
   "radar:start",
   "radar:complete",
   "radar:error",

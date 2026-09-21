@@ -1,5 +1,12 @@
 import { Command } from "commander";
-import { StateManager, formatLengthCount, readGenreProfile, resolveLengthCountingMode } from "@actalk/inkos-core";
+import {
+  StateManager,
+  commitChapter,
+  formatLengthCount,
+  readChapterFindings,
+  readGenreProfile,
+  resolveLengthCountingMode,
+} from "@actalk/inkos-core";
 import { findProjectRoot, resolveBookId, log, logError } from "../utils.js";
 
 export const reviewCommand = new Command("review")
@@ -104,6 +111,54 @@ function parseBookAndChapter(
   throw new Error("Usage: inkos review approve [book-id] <chapter>");
 }
 
+interface CommitOneResult {
+  readonly ok: boolean;
+  readonly code: string;
+  readonly message: string;
+}
+
+/**
+ * Commit one chapter through the same transactional gate the Studio uses.
+ *
+ * This replaced a raw `status: "approved"` index write. That bypassed every
+ * review guarantee: no findings check, no stale-audit check, no lock and no
+ * receipt — `review approve` could bless never-audited or audit-stale prose.
+ */
+async function commitOneChapter(
+  state: StateManager,
+  bookId: string,
+  chapterNum: number,
+): Promise<CommitOneResult> {
+  const releaseLock = await state.acquireBookLock(bookId);
+  try {
+    const bookDir = state.bookDir(bookId);
+    const index = await state.loadChapterIndex(bookId);
+    const meta = index.find((chapter) => chapter.number === chapterNum);
+    if (!meta) {
+      return { ok: false, code: "CHAPTER_NOT_FOUND", message: `Chapter ${chapterNum} not found in "${bookId}".` };
+    }
+    const { findings } = await readChapterFindings({
+      bookDir,
+      chapterNumber: chapterNum,
+      legacyAuditIssues: meta.auditIssues ?? [],
+    });
+    const result = await commitChapter(
+      {
+        bookDir: (id) => state.bookDir(id),
+        loadChapterIndex: (id) => state.loadChapterIndex(id),
+        saveChapterIndex: (id, next) => state.saveChapterIndex(id, next),
+      },
+      { bookId, chapterNumber: chapterNum, findings },
+    );
+    if (result.ok) {
+      return { ok: true, code: "OK", message: `Chapter ${chapterNum} approved (state committed).` };
+    }
+    return { ok: false, code: result.code, message: result.message };
+  } finally {
+    await releaseLock();
+  }
+}
+
 reviewCommand
   .command("approve")
   .description("Approve a chapter and commit its state: approve [book-id] <chapter>")
@@ -114,25 +169,22 @@ reviewCommand
       const root = findProjectRoot();
       const { bookIdArg, chapterNum } = parseBookAndChapter(args);
       const bookId = await resolveBookId(bookIdArg, root);
-
       const state = new StateManager(root);
-      const index = [...(await state.loadChapterIndex(bookId))];
-      const idx = index.findIndex((ch) => ch.number === chapterNum);
-      if (idx === -1) {
-        throw new Error(`Chapter ${chapterNum} not found in "${bookId}"`);
-      }
 
-      index[idx] = {
-        ...index[idx]!,
-        status: "approved",
-        updatedAt: new Date().toISOString(),
-      };
-      await state.saveChapterIndex(bookId, index);
+      const result = await commitOneChapter(state, bookId, chapterNum);
+      if (!result.ok) {
+        if (opts.json) {
+          log(JSON.stringify({ bookId, chapter: chapterNum, status: "rejected", code: result.code, error: result.message }));
+        } else {
+          logError(result.message);
+        }
+        process.exit(1);
+      }
 
       if (opts.json) {
         log(JSON.stringify({ bookId, chapter: chapterNum, status: "approved" }));
       } else {
-        log(`Chapter ${chapterNum} approved (state committed).`);
+        log(result.message);
       }
     } catch (e) {
       if (opts.json) {
@@ -155,24 +207,31 @@ reviewCommand
       const bookId = await resolveBookId(bookIdArg, root);
       const state = new StateManager(root);
 
-      const index = [...(await state.loadChapterIndex(bookId))];
-      let count = 0;
-      const now = new Date().toISOString();
+      const index = await state.loadChapterIndex(bookId);
+      // Only chapters that actually passed review are candidates; each still goes
+      // through the commit gate, which may reject it (stale audit, blockers).
+      const pending = index
+        .filter((ch) => ch.status === "ready-for-review")
+        .map((ch) => ch.number);
 
-      const updated = index.map((ch) => {
-        if (ch.status === "ready-for-review" || ch.status === "audit-failed") {
-          count++;
-          return { ...ch, status: "approved" as const, updatedAt: now };
-        }
-        return ch;
-      });
-
-      await state.saveChapterIndex(bookId, updated);
+      const approved: number[] = [];
+      const failed: Array<{ chapter: number; code: string; message: string }> = [];
+      for (const chapterNumber of pending) {
+        const result = await commitOneChapter(state, bookId, chapterNumber);
+        if (result.ok) approved.push(chapterNumber);
+        else failed.push({ chapter: chapterNumber, code: result.code, message: result.message });
+      }
 
       if (opts.json) {
-        log(JSON.stringify({ bookId, approvedCount: count }));
+        log(JSON.stringify({ bookId, approvedCount: approved.length, approved, failed }, null, 2));
       } else {
-        log(`${count} chapter(s) approved.`);
+        log(`${approved.length} chapter(s) approved.`);
+        for (const item of failed) {
+          logError(`  Ch.${item.chapter} not approved (${item.code}): ${item.message}`);
+        }
+      }
+      if (failed.length > 0) {
+        process.exit(1);
       }
     } catch (e) {
       if (opts.json) {
@@ -198,35 +257,45 @@ reviewCommand
       const bookId = await resolveBookId(bookIdArg, root);
 
       const state = new StateManager(root);
-      const index = await state.loadChapterIndex(bookId);
-      const idx = index.findIndex((ch) => ch.number === chapterNum);
-      if (idx === -1) {
-        throw new Error(`Chapter ${chapterNum} not found in "${bookId}"`);
-      }
 
-      if (opts.keepSubsequent) {
-        // Legacy behavior: only mark as rejected, no state rollback
-        const updated = [...index];
-        updated[idx] = {
-          ...updated[idx]!,
-          status: "rejected",
-          reviewNote: opts.reason ?? "Rejected without reason",
-          updatedAt: new Date().toISOString(),
-        };
-        await state.saveChapterIndex(bookId, updated);
-
-        if (opts.json) {
-          log(JSON.stringify({ bookId, chapter: chapterNum, status: "rejected", discarded: [] }));
-        } else {
-          log(`Chapter ${chapterNum} rejected (state not rolled back).`);
+      // The index read-modify-write and the rollback both mutate canonical state;
+      // hold the book lock so a concurrent writer cannot clobber either.
+      const releaseLock = await state.acquireBookLock(bookId);
+      let discarded: ReadonlyArray<number> = [];
+      try {
+        const index = await state.loadChapterIndex(bookId);
+        const idx = index.findIndex((ch) => ch.number === chapterNum);
+        if (idx === -1) {
+          throw new Error(`Chapter ${chapterNum} not found in "${bookId}"`);
         }
-        return;
-      }
 
-      // Default: roll back state to before the rejected chapter and discard
-      // it along with all subsequent chapters that depend on its state.
+        if (opts.keepSubsequent) {
+          // Legacy behavior: only mark as rejected, no state rollback
+          const updated = [...index];
+          updated[idx] = {
+            ...updated[idx]!,
+            status: "rejected",
+            reviewNote: opts.reason ?? "Rejected without reason",
+            updatedAt: new Date().toISOString(),
+          };
+          await state.saveChapterIndex(bookId, updated);
+
+          if (opts.json) {
+            log(JSON.stringify({ bookId, chapter: chapterNum, status: "rejected", discarded: [] }));
+          } else {
+            log(`Chapter ${chapterNum} rejected (state not rolled back).`);
+          }
+          return;
+        }
+
+        // Default: roll back state to before the rejected chapter and discard
+        // it along with all subsequent chapters that depend on its state.
+        const rollbackTarget = chapterNum - 1;
+        discarded = await state.rollbackToChapter(bookId, rollbackTarget);
+      } finally {
+        await releaseLock();
+      }
       const rollbackTarget = chapterNum - 1;
-      const discarded = await state.rollbackToChapter(bookId, rollbackTarget);
 
       if (opts.json) {
         log(JSON.stringify({

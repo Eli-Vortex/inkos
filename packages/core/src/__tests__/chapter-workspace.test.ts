@@ -4,11 +4,16 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   archiveChapterVersion,
+  pruneChapterVersions,
+  type ChapterVersionSource,
   listChapterVersions,
+  parseChapterFileNumber,
   readChapterPlanDocument,
+  readChapterRevision,
   readChapterUserBrief,
   readChapterVersion,
   saveChapterUserBrief,
+  selectChapterFile,
 } from "../state/chapter-workspace.js";
 
 async function exists(path: string): Promise<boolean> {
@@ -83,6 +88,104 @@ describe("chapter workspace", () => {
       .rejects.toThrow(/invalid chapter version id/i);
   });
 
+describe("chapter version retention", () => {
+  async function seedVersions(bookDir: string, count: number, source: ChapterVersionSource) {
+    for (let index = 0; index < count; index += 1) {
+      await archiveChapterVersion(
+        bookDir,
+        3,
+        `第 ${index} 版正文`,
+        source,
+        new Date(Date.UTC(2026, 0, 1, 0, 0, index)),
+      );
+    }
+  }
+
+  it("keeps the newest versions and drops the oldest beyond the cap", async () => {
+    const bookDir = await mkdtemp(join(tmpdir(), "inkos-retention-"));
+    await seedVersions(bookDir, 5, "manual");
+
+    const removed = await pruneChapterVersions(bookDir, 3, 3);
+    expect(removed).toHaveLength(2);
+
+    const remaining = await listChapterVersions(bookDir, 3);
+    expect(remaining).toHaveLength(3);
+    // Oldest-first: the two earliest timestamps are the ones dropped.
+    expect(remaining.map((version) => version.createdAt)).not.toContain(
+      new Date(Date.UTC(2026, 0, 1, 0, 0, 0)).toISOString(),
+    );
+  });
+
+  it("does nothing while under the cap", async () => {
+    const bookDir = await mkdtemp(join(tmpdir(), "inkos-retention-under-"));
+    await seedVersions(bookDir, 2, "manual");
+    await expect(pruneChapterVersions(bookDir, 3, 5)).resolves.toEqual([]);
+    expect(await listChapterVersions(bookDir, 3)).toHaveLength(2);
+  });
+
+  it("keeps restore points and does not empty the history to satisfy the cap", async () => {
+    const bookDir = await mkdtemp(join(tmpdir(), "inkos-retention-restore-"));
+    await seedVersions(bookDir, 3, "restore");
+    await seedVersions(bookDir, 3, "manual");
+
+    // The three restore points already fill the budget. Pruning the rest would
+    // delete every ordinary version, so nothing is removed instead.
+    const removed = await pruneChapterVersions(bookDir, 3, 3);
+    expect(removed).toEqual([]);
+    expect(await listChapterVersions(bookDir, 3)).toHaveLength(6);
+  });
+
+  it("prunes ordinary versions while preserving restore points", async () => {
+    const bookDir = await mkdtemp(join(tmpdir(), "inkos-retention-mixed-"));
+    await seedVersions(bookDir, 1, "restore");
+    await seedVersions(bookDir, 6, "manual");
+
+    const removed = await pruneChapterVersions(bookDir, 3, 4);
+    expect(removed).toHaveLength(3);
+
+    const remaining = await listChapterVersions(bookDir, 3);
+    expect(remaining.filter((version) => version.source === "restore")).toHaveLength(1);
+    expect(remaining).toHaveLength(4);
+  });
+});
+
+  it("locates chapter files by exact number, not a 4-character prefix", () => {
+    // A 5-digit number is 10000, not chapter 1000.
+    expect(parseChapterFileNumber("10000_x.md")).toBe(10000);
+    expect(parseChapterFileNumber("0007-foo.md")).toBe(7);
+    expect(parseChapterFileNumber("0007_bar.md")).toBe(7);
+    expect(parseChapterFileNumber("notes.md")).toBeNull();
+
+    expect(selectChapterFile(["10000_x.md"], 1000)).toBeNull();
+    expect(selectChapterFile(["0007-foo.md"], 7)).toBe("0007-foo.md");
+    // The canonical underscore form wins when both separators exist.
+    expect(selectChapterFile(["0007-a.md", "0007_b.md"], 7)).toBe("0007_b.md");
+  });
+
+  it("keeps the revision monotonic after history is pruned to the cap", async () => {
+    const bookDir = await mkdtemp(join(tmpdir(), "inkos-monotonic-revision-"));
+    await mkdir(join(bookDir, "chapters"), { recursive: true });
+    await writeFile(join(bookDir, "chapters", "0003_chapter.md"), "正文\n", "utf-8");
+
+    let previous = 0;
+    for (let index = 0; index < 25; index += 1) {
+      await archiveChapterVersion(
+        bookDir,
+        3,
+        `第 ${index} 版正文`,
+        "manual",
+        new Date(Date.UTC(2026, 0, 1, 0, 0, index)),
+      );
+      // Retention caps the archive directory; the revision must not cap with it.
+      await pruneChapterVersions(bookDir, 3, 20);
+      const info = await readChapterRevision(bookDir, 3);
+      expect(info).not.toBeNull();
+      expect(info!.revision).toBeGreaterThan(previous);
+      previous = info!.revision;
+    }
+    expect(previous).toBeGreaterThan(21);
+  });
+
   it("does not expose archives from another chapter", async () => {
     const bookDir = await mkdtemp(join(tmpdir(), "inkos-chapter-workspace-"));
     const version = await archiveChapterVersion(
@@ -100,3 +203,4 @@ describe("chapter workspace", () => {
     )).resolves.toBe("# 第1章");
   });
 });
+

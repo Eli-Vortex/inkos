@@ -1,4 +1,9 @@
-import type { AuditIssue, AuditResult } from "../agents/continuity.js";
+﻿import type { AuditIssue, AuditResult } from "../agents/continuity.js";
+import { saveChapterFindings } from "../state/chapter-findings-store.js";
+import {
+  auditIssuesToFindings,
+  findingsToLegacySummary,
+} from "../findings/producers/continuity.js";
 import type { ChapterMeta } from "../models/chapter.js";
 import type { LengthTelemetry } from "../models/length-governance.js";
 import { buildStateDegradedReviewNote } from "./chapter-state-recovery.js";
@@ -12,6 +17,7 @@ export interface ChapterPersistenceUsage {
 export type ChapterPersistenceStatus = "ready-for-review" | "audit-failed" | "state-degraded";
 
 export async function persistChapterArtifacts(params: {
+  readonly bookDir: string;
   readonly chapterNumber: number;
   readonly chapterTitle: string;
   readonly status: ChapterPersistenceStatus;
@@ -37,6 +43,23 @@ export async function persistChapterArtifacts(params: {
     await params.saveTruthFiles();
   }
 
+  // Structured findings are the source; the index summary is derived from them so
+  // the two readers cannot disagree about the same chapter. Written directly here
+  // rather than through a callback, so the array type cannot drift at the boundary.
+  const findings = auditIssuesToFindings(
+    params.status === "state-degraded"
+      ? [...params.auditResult.issues, ...params.degradedIssues]
+      : params.auditResult.issues,
+    { chapterNumber: params.chapterNumber },
+  );
+  // Best-effort: the prose and index are the primary record, and a failure to
+  // write the structured copy must not fail the chapter that was just written.
+  await saveChapterFindings({
+    bookDir: params.bookDir,
+    chapterNumber: params.chapterNumber,
+    findings,
+  }).catch(() => undefined);
+
   const existingIndex = await params.loadChapterIndex();
   const now = params.now?.() ?? new Date().toISOString();
   const entry: ChapterMeta = {
@@ -46,7 +69,7 @@ export async function persistChapterArtifacts(params: {
     wordCount: params.finalWordCount,
     createdAt: now,
     updatedAt: now,
-    auditIssues: params.auditResult.issues.map((issue) => `[${issue.severity}] ${issue.description}`),
+    auditIssues: [...findingsToLegacySummary(findings)],
     lengthWarnings: [...params.lengthWarnings],
     reviewNote: params.status === "state-degraded"
       ? buildStateDegradedReviewNote(
@@ -77,3 +100,4 @@ export async function persistChapterArtifacts(params: {
 
   return { entry };
 }
+

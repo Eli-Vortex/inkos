@@ -1,11 +1,13 @@
 import { fetchJson, useApi, postApi } from "../hooks/use-api";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import type { SSEMessage } from "../hooks/use-sse";
 import { useColors } from "../hooks/use-colors";
+import { ErrorState, LoadingState } from "../components/ui/states";
 import { deriveBookActivity, shouldRefetchBookView } from "../hooks/use-book-activity";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { PromptDialog } from "../components/PromptDialog";
 import {
   ChevronLeft,
   Zap,
@@ -51,6 +53,20 @@ interface BookData {
   readonly nextChapter: number;
 }
 
+interface BookMaterialEntry {
+  readonly facet: string;
+  readonly name: string;
+  readonly title: string;
+  readonly path: string;
+  readonly charCount: number;
+  readonly excerpt: string;
+}
+
+interface BookMaterialFacet {
+  readonly facet: string;
+  readonly entries: ReadonlyArray<BookMaterialEntry>;
+}
+
 type ReviseMode = "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect";
 type ExportFormat = "txt" | "md" | "epub";
 type BookStatus = "active" | "paused" | "outlining" | "completed" | "dropped";
@@ -70,16 +86,24 @@ function translateChapterStatus(status: string, t: TFunction): string {
     "needs-revision": () => t("chapter.needsRevision"),
     "imported": () => t("chapter.imported"),
     "audit-failed": () => t("chapter.auditFailed"),
+    "card-generated": () => t("chapter.cardGenerated"),
+    "drafting": () => t("chapter.drafting"),
+    "auditing": () => t("chapter.auditing"),
+    "audit-passed": () => t("chapter.auditPassed"),
+    "state-degraded": () => t("chapter.stateDegraded"),
+    "revising": () => t("chapter.revising"),
+    "rejected": () => t("chapter.rejected"),
+    "published": () => t("chapter.published"),
   };
-  return map[status]?.() ?? status;
+  return map[status]?.() ?? status.replace(/-/g, " ");
 }
 
 const STATUS_CONFIG: Record<string, { color: string; icon: React.ReactNode }> = {
-  "ready-for-review": { color: "text-amber-500 bg-amber-500/10", icon: <Eye size={12} /> },
-  approved: { color: "text-emerald-500 bg-emerald-500/10", icon: <Check size={12} /> },
+  "ready-for-review": { color: "text-warning bg-warning-soft", icon: <Eye size={12} /> },
+  approved: { color: "text-success bg-success-soft", icon: <Check size={12} /> },
   drafted: { color: "text-muted-foreground bg-muted/20", icon: <FileText size={12} /> },
   "needs-revision": { color: "text-destructive bg-destructive/10", icon: <RotateCcw size={12} /> },
-  imported: { color: "text-blue-500 bg-blue-500/10", icon: <Download size={12} /> },
+  imported: { color: "text-info bg-info-soft", icon: <Download size={12} /> },
 };
 
 export function BookDetail({
@@ -120,6 +144,78 @@ export function BookDetail({
       .then((r) => setReviewMode(r.mode === "manual" ? "manual" : "auto"))
       .catch(() => undefined);
   }, [bookId]);
+  const [materialFacets, setMaterialFacets] = useState<ReadonlyArray<BookMaterialFacet>>([]);
+  const [openMaterialKey, setOpenMaterialKey] = useState<string | null>(null);
+  const [materialContent, setMaterialContent] = useState<string | null>(null);
+  const loadMaterials = () => {
+    void fetchJson<{ facets?: ReadonlyArray<BookMaterialFacet> }>(`/books/${encodeURIComponent(bookId)}/materials`)
+      .then((r) => setMaterialFacets(r.facets ?? []))
+      .catch(() => setMaterialFacets([]));
+  };
+  useEffect(() => {
+    loadMaterials();
+  }, [bookId]);
+  const openMaterial = async (facet: string, name: string) => {
+    const key = `${facet}/${name}`;
+    if (openMaterialKey === key) {
+      setOpenMaterialKey(null);
+      return;
+    }
+    setOpenMaterialKey(key);
+    setMaterialContent(null);
+    try {
+      const r = await fetchJson<{ content?: string }>(
+        `/books/${encodeURIComponent(bookId)}/materials/${encodeURIComponent(facet)}/${encodeURIComponent(name)}`,
+      );
+      setMaterialContent(r.content ?? "");
+    } catch {
+      setMaterialContent("（读取失败）");
+    }
+  };
+  // In-app replacements for window.prompt / window.confirm / alert. Native
+  // browser dialogs are blocked in some embeds and look nothing like the app.
+  const promptResolver = useRef<((value: string | null) => void) | null>(null);
+  const [promptCfg, setPromptCfg] = useState<{
+    title: string;
+    description?: string;
+    placeholder?: string;
+    confirmLabel?: string;
+    requireValue?: boolean;
+  } | null>(null);
+  const askText = (cfg: NonNullable<typeof promptCfg>) =>
+    new Promise<string | null>((resolve) => {
+      promptResolver.current = resolve;
+      setPromptCfg(cfg);
+    });
+  const closePrompt = (value: string | null) => {
+    const resolve = promptResolver.current;
+    promptResolver.current = null;
+    setPromptCfg(null);
+    resolve?.(value);
+  };
+
+  const confirmResolver = useRef<((ok: boolean) => void) | null>(null);
+  const [askState, setAskState] = useState<{
+    title: string;
+    message: string;
+    confirmLabel?: string;
+    variant?: "danger" | "default";
+  } | null>(null);
+  const askConfirm = (cfg: NonNullable<typeof askState>) =>
+    new Promise<boolean>((resolve) => {
+      confirmResolver.current = resolve;
+      setAskState(cfg);
+    });
+  const closeAsk = (ok: boolean) => {
+    const resolve = confirmResolver.current;
+    confirmResolver.current = null;
+    setAskState(null);
+    resolve?.(ok);
+  };
+
+  const [notice, setNotice] = useState<{ title: string; message: string } | null>(null);
+  const notify = (message: string, title = "提示") => setNotice({ title, message });
+
   const activity = useMemo(() => deriveBookActivity(sse.messages, bookId), [bookId, sse.messages]);
   const writing = writeRequestPending || activity.writing;
   const drafting = draftRequestPending || activity.drafting;
@@ -155,7 +251,7 @@ export function BookDetail({
       await postApi(`/books/${bookId}/write-next`);
     } catch (e) {
       setWriteRequestPending(false);
-      alert(e instanceof Error ? e.message : "Failed");
+      notify(e instanceof Error ? e.message : "Failed", "操作失败");
     }
   };
 
@@ -165,7 +261,7 @@ export function BookDetail({
       await postApi(`/books/${bookId}/draft`);
     } catch (e) {
       setDraftRequestPending(false);
-      alert(e instanceof Error ? e.message : "Failed");
+      notify(e instanceof Error ? e.message : "Failed", "操作失败");
     }
   };
 
@@ -194,19 +290,21 @@ export function BookDetail({
       }
       nav.toDashboard();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Delete failed");
+      notify(e instanceof Error ? e.message : "Delete failed", "删除失败");
     } finally {
       setDeleting(false);
     }
   };
 
   const handleRewrite = async (chapterNum: number) => {
-    const brief = window.prompt(
-      data?.book.language === "en"
-        ? "Optional rewrite brief for this run only. Leave blank to use existing focus."
-        : "可选：输入这次重写要遵循的补充想法。留空则沿用现有 focus。",
-      "",
-    );
+    const isEn = data?.book.language === "en";
+    const brief = await askText({
+      title: isEn ? "Rewrite brief" : "重写补充说明",
+      description: isEn
+        ? "Optional brief for this run only. Leave blank to use the existing focus."
+        : "可选：这次重写要遵循的补充想法。留空则沿用现有 focus。",
+      placeholder: isEn ? "Leave blank to rewrite directly" : "留空直接重写",
+    });
     if (brief === null) return;
     setRewritingChapters((prev) => [...prev, chapterNum]);
     try {
@@ -217,42 +315,54 @@ export function BookDetail({
       });
       refetch();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Rewrite failed");
+      notify(e instanceof Error ? e.message : "Rewrite failed", "重写失败");
     } finally {
       setRewritingChapters((prev) => prev.filter((n) => n !== chapterNum));
     }
   };
 
   const handleRevise = async (chapterNum: number, mode: ReviseMode) => {
-    const brief = window.prompt(
-      data?.book.language === "en"
-        ? "Optional revise brief for this run only. Leave blank to use existing focus."
-        : "可选：输入这次修订要遵循的补充想法。留空则沿用现有 focus。",
-      "",
-    );
+    const isEn = data?.book.language === "en";
+    const brief = await askText({
+      title: isEn ? "Revise brief" : "修订补充说明",
+      description: isEn
+        ? "Optional brief for this run only. Leave blank to use the existing focus."
+        : "可选：这次修订要遵循的补充想法。留空则沿用现有 focus。",
+      placeholder: isEn ? "Leave blank to revise directly" : "留空直接修订",
+    });
     if (brief === null) return;
+    // 默认走"安全闸门"：修订若没能减少复核问题就保留原稿。想无条件覆盖时选"强制覆盖"。
+    const force = await askConfirm({
+      title: isEn ? "Force overwrite?" : "是否强制覆盖？",
+      message: isEn
+        ? "Apply the revision even if it does not reduce the review issues?\n\nForce = overwrite regardless; Cancel = keep the original chapter when the revision does not improve."
+        : "即使复核问题没有减少，也直接用它覆盖原章节吗？\n\n强制覆盖 = 无条件写入；取消 = 沿用安全策略（修订没变好就保留原稿）",
+      confirmLabel: isEn ? "Force overwrite" : "强制覆盖",
+    });
     setRevisingChapters((prev) => [...prev, chapterNum]);
     try {
       await fetchJson(`/books/${bookId}/revise/${chapterNum}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, brief: brief.trim() || undefined }),
+        body: JSON.stringify({ mode, brief: brief.trim() || undefined, force: force || undefined }),
       });
       refetch();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Revision failed");
+      notify(e instanceof Error ? e.message : "Revision failed", "修订失败");
     } finally {
       setRevisingChapters((prev) => prev.filter((n) => n !== chapterNum));
     }
   };
 
   const handleSync = async (chapterNum: number) => {
-    const brief = window.prompt(
-      data?.book.language === "en"
-        ? "Optional sync brief for interpreting the edited chapter body. Leave blank to sync directly from the text."
-        : "可选：输入这次同步时要遵循的补充说明。留空则直接按正文同步。",
-      "",
-    );
+    const isEn = data?.book.language === "en";
+    const brief = await askText({
+      title: isEn ? "Sync brief" : "同步补充说明",
+      description: isEn
+        ? "Optional brief for interpreting the edited chapter body. Leave blank to sync directly from the text."
+        : "可选：这次同步时要遵循的补充说明。留空则直接按正文同步。",
+      placeholder: isEn ? "Leave blank to sync directly" : "留空直接同步",
+    });
     if (brief === null) return;
     setSyncingChapters((prev) => [...prev, chapterNum]);
     try {
@@ -263,7 +373,7 @@ export function BookDetail({
       });
       refetch();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Sync failed");
+      notify(e instanceof Error ? e.message : "Sync failed", "同步失败");
     } finally {
       setSyncingChapters((prev) => prev.filter((n) => n !== chapterNum));
     }
@@ -284,9 +394,35 @@ export function BookDetail({
       });
       refetch();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Save failed");
+      notify(e instanceof Error ? e.message : "Save failed", "保存失败");
     } finally {
       setSavingSettings(false);
+    }
+  };
+
+  const handleUnlock = async () => {
+    try {
+      await fetchJson(`/books/${encodeURIComponent(bookId)}/unlock`, { method: "POST" });
+      notify("已强制释放写入锁，可以继续编辑 / 修订。", "解锁成功");
+    } catch (e) {
+      notify(e instanceof Error ? e.message : "Unlock failed", "解锁失败");
+    }
+  };
+
+  const handleDeleteChapter = async (chapterNum: number) => {
+    const ok = await askConfirm({
+      title: `删除第 ${chapterNum} 章？`,
+      message: "只允许删除最新章节。正文会先保留到回收站，故事状态回滚到上一章。",
+      confirmLabel: "删除",
+      variant: "danger",
+    });
+    if (!ok) return;
+    try {
+      await fetchJson(`/books/${encodeURIComponent(bookId)}/chapters/${chapterNum}`, { method: "DELETE" });
+      notify(`已删除第 ${chapterNum} 章。`, "删除成功");
+      refetch();
+    } catch (e) {
+      notify(e instanceof Error ? e.message : "Delete failed", "删除失败");
     }
   };
 
@@ -302,7 +438,7 @@ export function BookDetail({
       }
     }
     if (failed > 0) {
-      alert(`${failed}/${reviewable.length} approve(s) failed`);
+      notify(`${failed}/${reviewable.length} approve(s) failed`, "部分审核未通过");
     }
     refetch();
   };
@@ -310,10 +446,10 @@ export function BookDetail({
   const runBookAction = async (key: string, action: () => Promise<string>) => {
     setBookActionPending(key);
     try {
-      alert(await action());
+      notify(await action());
       refetch();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Action failed");
+      notify(e instanceof Error ? e.message : "Action failed", "操作失败");
     } finally {
       setBookActionPending(null);
     }
@@ -352,13 +488,17 @@ export function BookDetail({
   };
 
   const handleReviseFoundation = async () => {
-    const feedback = window.prompt(
-      data?.book.language === "en"
-        ? "Foundation revision feedback. This rewrites the book foundation, not chapter body."
+    const isEn = data?.book.language === "en";
+    const feedback = await askText({
+      title: isEn ? "Revise foundation" : "重修基础设定",
+      description: isEn
+        ? "Feedback for the foundation revision. This rewrites the book foundation, not the chapter body."
         : "输入重修基础设定的反馈。此操作会重写基础设定，不直接改正文。",
-      "",
-    );
-    if (!feedback?.trim()) return;
+      placeholder: isEn ? "e.g. strengthen the opening conflict" : "例如：强化开篇冲突、收紧世界观",
+      confirmLabel: isEn ? "Revise" : "开始重修",
+      requireValue: true,
+    });
+    if (feedback === null || !feedback.trim()) return;
     await runBookAction("revise-foundation", async () => {
       await fetchJson(`/books/${bookId}/foundation/revise`, {
         method: "POST",
@@ -370,12 +510,12 @@ export function BookDetail({
   };
 
   const handlePlan = async () => {
-    const context = window.prompt(
-      data?.book.language === "en"
-        ? "Optional planning context for the next chapter."
-        : "可选：下一章规划补充说明。",
-      "",
-    );
+    const isEn = data?.book.language === "en";
+    const context = await askText({
+      title: isEn ? "Plan next chapter" : "规划下一章",
+      description: isEn ? "Optional planning context for the next chapter." : "可选：下一章规划补充说明。",
+      placeholder: isEn ? "Leave blank to plan directly" : "留空直接规划",
+    });
     if (context === null) return;
     await runBookAction("plan", async () => {
       const result = await fetchJson<{ chapterNumber?: number; title?: string }>(`/books/${bookId}/plan`, {
@@ -390,12 +530,12 @@ export function BookDetail({
   };
 
   const handleCompose = async () => {
-    const context = window.prompt(
-      data?.book.language === "en"
-        ? "Optional compose context for the next chapter."
-        : "可选：下一章组装补充说明。",
-      "",
-    );
+    const isEn = data?.book.language === "en";
+    const context = await askText({
+      title: isEn ? "Compose next chapter" : "组装下一章",
+      description: isEn ? "Optional compose context for the next chapter." : "可选：下一章组装补充说明。",
+      placeholder: isEn ? "Leave blank to compose directly" : "留空直接组装",
+    });
     if (context === null) return;
     await runBookAction("compose", async () => {
       const result = await fetchJson<{ chapterNumber?: number; title?: string }>(`/books/${bookId}/compose`, {
@@ -416,17 +556,14 @@ export function BookDetail({
     });
   };
 
-  if (loading) return (
-    <div className="flex flex-col items-center justify-center py-32 space-y-4">
-      <div className="w-8 h-8 border-2 border-primary/20 border-t-primary rounded-full animate-spin" />
-      <span className="text-sm text-muted-foreground">{t("common.loading")}</span>
-    </div>
-  );
+  if (loading) return <LoadingState label={t("common.loading")} />;
 
-  if (error) return <div className="text-destructive p-8 bg-destructive/5 rounded-xl border border-destructive/20">Error: {error}</div>;
+  if (error) return <ErrorState title={t("common.error")} message={error} className="m-8" />;
   if (!data) return null;
 
   const { book, chapters } = data;
+  // Only the latest chapter may be deleted (middle deletion would orphan state).
+  const latestChapterNumber = chapters.reduce((max, ch) => Math.max(max, ch.number), 0);
   const totalWords = chapters.reduce((sum, ch) => sum + (ch.wordCount ?? 0), 0);
   const reviewCount = chapters.filter((ch) => ch.status === "ready-for-review").length;
 
@@ -471,7 +608,7 @@ export function BookDetail({
               <span>{totalWords.toLocaleString()} {t("book.words")}</span>
             </div>
             {book.fanficMode && (
-              <span className="flex items-center gap-1 text-purple-500">
+              <span className="flex items-center gap-1 text-primary">
                 <Sparkles size={12} />
                 <span className="italic">fanfic:{book.fanficMode}</span>
               </span>
@@ -542,7 +679,7 @@ export function BookDetail({
           {reviewCount > 0 && (
             <button
               onClick={handleApproveAll}
-              className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-emerald-500/10 text-emerald-600 rounded-lg hover:bg-emerald-500/20 transition-all border border-emerald-500/20"
+              className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-success-soft text-success rounded-lg hover:bg-success-soft transition-all border border-success/30"
             >
               <CheckCheck size={14} />
               {t("book.approveAll")} ({reviewCount})
@@ -629,9 +766,9 @@ export function BookDetail({
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ format: exportFormat, approvedOnly: exportApprovedOnly }),
                   });
-                  alert(`${t("common.exportSuccess")}\n${data.path}\n(${data.chapters} ${t("dash.chapters")})`);
+                  notify(`${t("common.exportSuccess")}\n${data.path}\n(${data.chapters} ${t("dash.chapters")})`, "导出完成");
                 } catch (e) {
-                  alert(e instanceof Error ? e.message : "Export failed");
+                  notify(e instanceof Error ? e.message : "Export failed", "导出失败");
                 }
               }}
               className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-secondary/50 text-muted-foreground rounded-lg hover:text-foreground hover:bg-secondary transition-all border border-border/50"
@@ -640,6 +777,57 @@ export function BookDetail({
               {t("book.export")}
             </button>
           </div>
+      </div>
+
+      {/* Book Materials — model-collected research library, grouped by facet */}
+      <div className="paper-sheet rounded-2xl border border-border/40 shadow-sm p-6">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">资料库</h2>
+          <button
+            type="button"
+            onClick={loadMaterials}
+            className="flex items-center gap-1.5 rounded-lg border border-border/50 bg-secondary/50 px-2.5 py-1 text-[11px] font-bold text-muted-foreground transition-all hover:bg-secondary hover:text-foreground"
+            title="重新读取资料"
+          >
+            <RefreshCw size={12} />
+            刷新
+          </button>
+        </div>
+        {materialFacets.length === 0 ? (
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            还没有资料。在对话里让助手整理某一类资料（人物 / 制度 / 地图 / 财务 …），保存后会按分类出现在这里。
+          </p>
+        ) : (
+          <div className="space-y-4">
+            {materialFacets.map((group) => (
+              <div key={group.facet}>
+                <div className="mb-2 text-[11px] font-bold uppercase tracking-widest text-primary">{group.facet}</div>
+                <div className="space-y-1.5">
+                  {group.entries.map((entry) => {
+                    const key = `${entry.facet}/${entry.name}`;
+                    return (
+                      <div key={entry.path}>
+                        <button
+                          type="button"
+                          onClick={() => void openMaterial(entry.facet, entry.name)}
+                          className="flex w-full items-center justify-between gap-3 rounded-lg border border-border/40 bg-secondary/30 px-3 py-2 text-left transition-all hover:border-primary/30 hover:bg-secondary/60"
+                        >
+                          <span className="min-w-0 truncate text-[13px] font-medium text-foreground">{entry.title}</span>
+                          <span className="shrink-0 text-[11px] text-muted-foreground">{entry.charCount} 字</span>
+                        </button>
+                        {openMaterialKey === key && (
+                          <pre className="mt-1.5 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border/40 bg-background/70 px-3 py-2 text-[12px] leading-6 text-foreground">
+                            {materialContent ?? "读取中…"}
+                          </pre>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Book Settings */}
@@ -686,14 +874,23 @@ export function BookDetail({
             {savingSettings ? <div className="w-4 h-4 border-2 border-primary-foreground/20 border-t-primary-foreground rounded-full animate-spin" /> : <Save size={14} />}
             {savingSettings ? t("book.saving") : t("book.save")}
           </button>
+          <button
+            type="button"
+            onClick={handleUnlock}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-bold bg-secondary/50 text-muted-foreground rounded-lg hover:text-foreground hover:bg-secondary transition-all border border-border/50"
+            title="当一直提示“作品被锁定/写入进行中”且任务已停止时，用它强制释放写入锁"
+          >
+            <RotateCcw size={14} />
+            强制解锁
+          </button>
         </div>
       </div>
 
       {/* Chapters Table */}
       <div className="paper-sheet rounded-2xl overflow-hidden border border-border/40 shadow-xl shadow-primary/5">
-        <div className="overflow-x-auto">
+        <div className="max-h-[620px] overflow-auto">
           <table className="w-full text-sm border-collapse">
-            <thead>
+            <thead className="sticky top-0 z-1 bg-secondary/80 backdrop-blur-sm">
               <tr className="bg-muted/30 border-b border-border/50">
                 <th className="text-left px-6 py-4 font-bold text-[11px] uppercase tracking-widest text-muted-foreground w-16">#</th>
                 <th className="text-left px-6 py-4 font-bold text-[11px] uppercase tracking-widest text-muted-foreground">{t("book.manuscriptTitle")}</th>
@@ -730,9 +927,9 @@ export function BookDetail({
                           <button
                             onClick={async () => {
                               try { await postApi(`/books/${bookId}/chapters/${ch.number}/approve`); refetch(); }
-                              catch (e) { alert(e instanceof Error ? e.message : "Approve failed"); }
+                              catch (e) { notify(e instanceof Error ? e.message : "Approve failed", "通过失败"); }
                             }}
-                            className="p-2 rounded-lg bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500 hover:text-white transition-all shadow-sm"
+                            className="p-2 rounded-lg bg-success-soft text-success hover:bg-success hover:text-white transition-all shadow-sm"
                             title={t("book.approve")}
                           >
                             <Check size={14} />
@@ -740,7 +937,7 @@ export function BookDetail({
                           <button
                             onClick={async () => {
                               try { await postApi(`/books/${bookId}/chapters/${ch.number}/reject`); refetch(); }
-                              catch (e) { alert(e instanceof Error ? e.message : "Reject failed"); }
+                              catch (e) { notify(e instanceof Error ? e.message : "Reject failed", "驳回失败"); }
                             }}
                             className="p-2 rounded-lg bg-destructive/10 text-destructive hover:bg-destructive hover:text-white transition-all shadow-sm"
                             title={t("book.reject")}
@@ -753,10 +950,13 @@ export function BookDetail({
                         onClick={async () => {
                           try {
                             const auditResult = await fetchJson<{ passed?: boolean; issues?: unknown[] }>(`/books/${bookId}/audit/${ch.number}`, { method: "POST" });
-                            alert(auditResult.passed ? "Audit passed" : `Audit failed: ${auditResult.issues?.length ?? 0} issues`);
+                            notify(
+                              auditResult.passed ? "审核通过" : `审核未通过：${auditResult.issues?.length ?? 0} 条问题`,
+                              "审核结果",
+                            );
                             refetch();
                           } catch (e) {
-                            alert(e instanceof Error ? e.message : "Audit failed");
+                            notify(e instanceof Error ? e.message : "Audit failed", "审核失败");
                           }
                         }}
                         className="p-2 rounded-lg bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all shadow-sm"
@@ -788,11 +988,11 @@ export function BookDetail({
                         <button
                           onClick={() => handleRepairState(ch.number)}
                           disabled={bookActionPending === `repair-state-${ch.number}`}
-                          className="p-2 rounded-lg bg-amber-500/10 text-amber-600 hover:bg-amber-500 hover:text-white transition-all shadow-sm disabled:opacity-50"
+                          className="p-2 rounded-lg bg-warning-soft text-warning hover:bg-warning hover:text-white transition-all shadow-sm disabled:opacity-50"
                           title={t("book.repairState")}
                         >
                           {bookActionPending === `repair-state-${ch.number}`
-                            ? <div className="w-3.5 h-3.5 border-2 border-amber-600/20 border-t-amber-600 rounded-full animate-spin" />
+                            ? <div className="w-3.5 h-3.5 border-2 border-warning/35 border-t-amber-600 rounded-full animate-spin" />
                             : <Settings2 size={14} />}
                         </button>
                       )}
@@ -813,6 +1013,16 @@ export function BookDetail({
                         <option value="rework">{t("book.rework")}</option>
                         <option value="anti-detect">{t("book.antiDetect")}</option>
                       </select>
+                      {ch.number === latestChapterNumber && (
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteChapter(ch.number)}
+                          className="p-2 rounded-lg bg-destructive/10 text-destructive hover:bg-destructive hover:text-white transition-all shadow-sm"
+                          title="删除本章（仅允许删除最新章，正文会先保留到回收站）"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -843,6 +1053,39 @@ export function BookDetail({
         variant="danger"
         onConfirm={handleDeleteBook}
         onCancel={() => setConfirmDeleteOpen(false)}
+      />
+
+      {/* In-app replacements for window.prompt / window.confirm / alert */}
+      <PromptDialog
+        open={promptCfg !== null}
+        title={promptCfg?.title ?? ""}
+        description={promptCfg?.description}
+        placeholder={promptCfg?.placeholder}
+        confirmLabel={promptCfg?.confirmLabel ?? t("common.confirm")}
+        cancelLabel={t("common.cancel")}
+        requireValue={promptCfg?.requireValue}
+        onConfirm={(value) => closePrompt(value)}
+        onCancel={() => closePrompt(null)}
+      />
+      <ConfirmDialog
+        open={askState !== null}
+        title={askState?.title ?? ""}
+        message={askState?.message ?? ""}
+        confirmLabel={askState?.confirmLabel ?? t("common.confirm")}
+        cancelLabel={t("common.cancel")}
+        variant={askState?.variant ?? "default"}
+        onConfirm={() => closeAsk(true)}
+        onCancel={() => closeAsk(false)}
+      />
+      <ConfirmDialog
+        open={notice !== null}
+        title={notice?.title ?? ""}
+        message={notice?.message ?? ""}
+        confirmLabel={t("common.confirm")}
+        cancelLabel={t("common.cancel")}
+        hideCancel
+        onConfirm={() => setNotice(null)}
+        onCancel={() => setNotice(null)}
       />
     </div>
   );

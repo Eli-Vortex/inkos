@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -94,8 +94,48 @@ describe("deleteLatestChapter", () => {
       .resolves.toBe("hooks at chapter 2");
   });
 
-  it("rejects deleting a chapter that is not the latest", async () => {
+  it("removes the deleted chapter's findings, approval and version history", async () => {
     const { root, bookDir } = await setupBook({
+      bookId: "reusebook",
+      chapters: [
+        { number: 1, title: "起风", content: "第一章。" },
+        { number: 2, title: "落雨", content: "第二章。" },
+      ],
+      snapshotChapters: [1, 2],
+    });
+
+    // Derived state keyed only by chapter number — the shape that would otherwise
+    // be inherited by whatever chapter 2 becomes next.
+    await mkdir(join(bookDir, "chapters", "findings"), { recursive: true });
+    await writeFile(
+      join(bookDir, "chapters", "findings", "0002.json"),
+      JSON.stringify({ schemaVersion: 1, chapterNumber: 2, updatedAt: "2026-01-01T00:00:00.000Z", findings: [] }),
+      "utf-8",
+    );
+    await mkdir(join(bookDir, "story", "runtime"), { recursive: true });
+    await writeFile(
+      join(bookDir, "story", "runtime", "chapter-0002.approval.json"),
+      JSON.stringify({ schemaVersion: 1, chapterNumber: 2 }),
+      "utf-8",
+    );
+    await mkdir(join(bookDir, "chapters", ".versions", "0002"), { recursive: true });
+    await writeFile(
+      join(bookDir, "chapters", ".versions", "0002", "1700000000000_manual_00000000-0000-0000-0000-000000000000.md"),
+      "旧版正文",
+      "utf-8",
+    );
+
+    const state = new StateManager(root);
+    await deleteLatestChapter(state, "reusebook");
+
+    await expect(exists(join(bookDir, "chapters", "findings", "0002.json"))).resolves.toBe(false);
+    await expect(exists(join(bookDir, "story", "runtime", "chapter-0002.approval.json"))).resolves.toBe(false);
+    await expect(exists(join(bookDir, "chapters", ".versions", "0002"))).resolves.toBe(false);
+    // Chapter 1's own derived state is untouched.
+    await expect(exists(join(bookDir, "chapters", "findings", "0001.json"))).resolves.toBe(false);
+  });
+
+  it("rejects deleting a chapter that is not the latest", async () => {    const { root, bookDir } = await setupBook({
       bookId: "midbook",
       chapters: [
         { number: 1, title: "起风", content: "第一章。" },
@@ -223,5 +263,28 @@ describe("deleteLatestChapter", () => {
     expect(result.deletedChapter).toBe(2);
     const trashEntries = await readdir(join(bookDir, "chapters", ".trash"));
     expect(trashEntries.sort()).toEqual(["0002_落雨.md", "0009_幽灵.md"]);
+  });
+});
+
+describe("rollbackToChapter", () => {
+  it("deletes hyphen-named chapter files so the empty-index rebuild cannot resurrect them", async () => {
+    const { root, bookDir } = await setupBook({
+      bookId: "hyphen-rollback",
+      chapters: [{ number: 1, title: "楔子", content: "# 第1章 楔子\n\n正文。" }],
+      snapshotChapters: [0],
+    });
+    // Replace the underscore file with the hyphenated form the shared locator accepts.
+    await rm(join(bookDir, "chapters", "0001_楔子.md"));
+    await writeFile(join(bookDir, "chapters", "0001-楔子.md"), "# 第1章 楔子\n\n正文。", "utf-8");
+
+    const state = new StateManager(root);
+    const discarded = await state.rollbackToChapter("hyphen-rollback", 0);
+
+    expect(discarded).toEqual([1]);
+    await expect(exists(join(bookDir, "chapters", "0001-楔子.md"))).resolves.toBe(false);
+    const savedIndex = JSON.parse(
+      await readFile(join(bookDir, "chapters", "index.json"), "utf-8"),
+    ) as ChapterMeta[];
+    expect(savedIndex).toEqual([]);
   });
 });

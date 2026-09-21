@@ -3,6 +3,7 @@ import { fetchJson, useApi, postApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
+import { ErrorState, LoadingState } from "../components/ui/states";
 import { ChapterWorkspacePanel } from "../components/ChapterWorkspacePanel";
 import {
   ChevronLeft,
@@ -77,14 +78,9 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
     }
   };
 
-  if (loading && !data) return (
-    <div className="flex flex-col items-center justify-center py-32 space-y-4">
-      <div className="w-8 h-8 border-2 border-primary/20 border-t-primary rounded-full animate-spin" />
-      <span className="text-sm text-muted-foreground">{t("reader.openingManuscript")}</span>
-    </div>
-  );
+  if (loading && !data) return <LoadingState label={t("reader.openingManuscript")} />;
 
-  if (error) return <div className="text-destructive p-8 bg-destructive/5 rounded-xl border border-destructive/20">Error: {error}</div>;
+  if (error) return <ErrorState title={t("common.error")} message={error} className="m-8" />;
   if (!data) return null;
 
   // Split markdown content into title and body
@@ -181,7 +177,7 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
 
           <button
             onClick={handleApprove}
-            className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-emerald-500/10 text-emerald-600 rounded-xl hover:bg-emerald-500 hover:text-white transition-all border border-emerald-500/20 shadow-sm"
+            className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-success-soft text-success rounded-xl hover:bg-success hover:text-white transition-all border border-success/30 shadow-sm"
           >
             <CheckCircle2 size={14} />
             {t("reader.approve")}
@@ -217,7 +213,7 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
             <BookOpen size={20} />
             <div className="h-px w-12 bg-border/40" />
           </div>
-          <h1 className="text-4xl md:text-5xl font-serif font-medium italic text-foreground tracking-tight leading-tight">
+          <h1 className="text-4xl md:text-5xl font-serif font-medium text-foreground tracking-tight leading-tight">
             {title}
           </h1>
           <div className="mt-8 flex items-center justify-center gap-4 text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground/60">

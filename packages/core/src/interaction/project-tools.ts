@@ -147,19 +147,9 @@ async function withBookMutationLock<T>(
   }
 }
 
-export function buildChapterFileLookup(files: ReadonlyArray<string>): ReadonlyMap<number, string> {
-  const lookup = new Map<number, string>();
-  for (const file of files) {
-    if (!file.endsWith(".md") || !/^\d{4}/.test(file)) {
-      continue;
-    }
-    const chapterNumber = parseInt(file.slice(0, 4), 10);
-    if (!lookup.has(chapterNumber)) {
-      lookup.set(chapterNumber, file);
-    }
-  }
-  return lookup;
-}
+// Canonical implementation lives with the other chapter-file helpers, so export
+// and the runtime tools share one matcher instead of two drifting copies.
+export { buildChapterFileLookup } from "../state/chapter-workspace.js";
 
 async function exportBookToPath(state: StateLike, bookId: string, options: {
   readonly format?: "txt" | "md" | "epub";
@@ -408,7 +398,7 @@ export function createInteractionToolsFromDeps(
               {
                 role: "system",
                 content: [
-                  "You are InkOS inside the terminal workbench.",
+                  "You are Novel Creation inside the terminal workbench.",
                   "Respond conversationally and briefly.",
                   "If there is no active book, help the user decide what to write next.",
                   "If there is an active book, keep the answer grounded in that book context.",

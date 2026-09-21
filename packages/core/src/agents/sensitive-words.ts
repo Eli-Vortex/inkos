@@ -6,6 +6,7 @@
  */
 
 import type { AuditIssue } from "./continuity.js";
+import { escapeRegExp } from "../utils/escape-regexp.js";
 
 export interface SensitiveWordMatch {
   readonly word: string;
@@ -137,6 +138,3 @@ function scanWords(
   return matches;
 }
 
-function escapeRegExp(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}

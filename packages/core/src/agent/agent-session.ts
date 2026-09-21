@@ -16,6 +16,8 @@ import type {
 } from "@mariozechner/pi-ai";
 import type { PipelineRunner } from "../pipeline/runner.js";
 import { buildAgentSystemPrompt } from "./agent-system-prompt.js";
+import { readGenreProfile } from "../agents/rules-reader.js";
+import type { ParsedGenreProfile } from "../models/genre-profile.js";
 import {
   createPatchChapterTextTool,
   createReplaceChapterTextTool,
@@ -45,6 +47,7 @@ import {
   createResearchWebTool,
   createIngestMaterialTool,
   createRetrieveMaterialTool,
+  createSaveMaterialTool,
   createManageBookReferenceTool,
   createImportChaptersTool,
 } from "./agent-tools.js";
@@ -57,7 +60,10 @@ import {
 import { createBookContextTransform, createInteractiveFilmContextTransform } from "./context-transform.js";
 import {
   appendTranscriptEvents,
+  messageTimestamp,
   readTranscriptEvents,
+  toolCallIdForMessage,
+  transcriptRoleForMessage,
 } from "../interaction/session-transcript.js";
 import {
   TOOL_RESULT_BRIDGE_TEXT,
@@ -111,6 +117,8 @@ export interface AgentSessionConfig {
   requestedSkills?: ReadonlyArray<string>;
   /** Agent Skills explicitly disabled for this turn. */
   disabledSkills?: ReadonlyArray<string>;
+  /** Optional genre identifier or name to inject domain rules into the prompt (e.g. "xiuxian", "rules-weird", "玄幻"). */
+  genre?: string;
   /** Language for the system prompt. */
   language: string;
   /** PipelineRunner for sub-agent tool delegation. */
@@ -453,47 +461,6 @@ async function latestCommittedSeq(projectRoot: string, sessionId: string): Promi
     .reduce((max, event) => Math.max(max, event.seq), 0);
 }
 
-function transcriptRoleForMessage(message: AgentMessage): TranscriptRole | null {
-  if (!message || typeof message !== "object" || !("role" in message)) return null;
-  const role = (message as { role?: unknown }).role;
-  return role === "user" || role === "assistant" || role === "toolResult" || role === "system"
-    ? role
-    : null;
-}
-
-function firstToolCallId(message: AgentMessage): string | undefined {
-  if (!message || typeof message !== "object" || !("content" in message)) return undefined;
-  const content = (message as { content?: unknown }).content;
-  if (!Array.isArray(content)) return undefined;
-  const block = content.find(
-    (item): item is { type: "toolCall"; id: string } =>
-      !!item &&
-      typeof item === "object" &&
-      (item as { type?: unknown }).type === "toolCall" &&
-      typeof (item as { id?: unknown }).id === "string",
-  );
-  return block?.id;
-}
-
-function toolCallIdForMessage(message: AgentMessage): string | undefined {
-  if (!message || typeof message !== "object") return undefined;
-  if ((message as { role?: unknown }).role === "toolResult") {
-    const toolCallId = (message as { toolCallId?: unknown }).toolCallId;
-    return typeof toolCallId === "string" && toolCallId.length > 0 ? toolCallId : undefined;
-  }
-  return firstToolCallId(message);
-}
-
-function messageTimestamp(message: AgentMessage): number {
-  if (message && typeof message === "object") {
-    const timestamp = (message as { timestamp?: unknown }).timestamp;
-    if (typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp >= 0) {
-      return Math.floor(timestamp);
-    }
-  }
-  return Date.now();
-}
-
 async function ensureSessionCreatedEvent(
   projectRoot: string,
   sessionId: string,
@@ -579,7 +546,7 @@ function convertAgentMessagesForModel(messages: AgentMessage[], model: Model<Api
   });
 
   const candidate = model as { api?: unknown; baseUrl?: unknown };
-  // InkOS's internal `toolResult` role is not part of the OpenAI Chat Completions spec.
+  // Novel Creation's internal `toolResult` role is not part of the OpenAI Chat Completions spec.
   // Many openai-completions upstreams (Google, and kkaiapi/DeepSeek-Pro-style gateways) reject
   // it outright — which surfaces as an opaque "503 provider temporarily unavailable" — so fold
   // tool results into a plain user message for EVERY openai-completions endpoint, not just Google.
@@ -972,7 +939,10 @@ function createModeTools(params: CreateAgentToolsForModeParams) {
   const bookTools = [
     subAgentTool,
     createGenerateCoverTool(params.projectRoot, { actionPayload: params.actionPayload }),
-    createReadTool(params.projectRoot, { allowSystemPaths: params.allowSystemFileRead }),
+    createReadTool(params.projectRoot, {
+      allowSystemPaths: params.allowSystemFileRead,
+      bookId: params.bookId,
+    }),
     createWriteTruthFileTool(params.pipeline, params.projectRoot, params.bookId),
     createRenameEntityTool(params.pipeline, params.projectRoot, params.bookId),
     createPatchChapterTextTool(params.pipeline, params.projectRoot, params.bookId),
@@ -985,6 +955,8 @@ function createModeTools(params: CreateAgentToolsForModeParams) {
     createDeleteLatestChapterTool(params.projectRoot, params.bookId),
     researchTool,
     materialTool,
+    // Book-scoped research library: only meaningful when a book is active.
+    ...(params.bookId ? [createSaveMaterialTool(params.projectRoot, params.bookId)] : []),
     materialRetrievalTool,
     createManageBookReferenceTool(params.projectRoot, params.bookId),
     importChaptersTool,
@@ -1146,12 +1118,30 @@ async function runAgentSessionUnlocked(
     );
     const allowIntentSkillSelection = actionSource === "free-text"
       && skillResolution.forcedSkillIds.length === 0;
+
+    // Resolve genre rules if provided by session configuration or bound to the active book.
+    let resolvedGenreProfile: ParsedGenreProfile | undefined;
+    const canReadBookGenre = typeof pipeline.getBookGenre === "function";
+    const targetGenre = config.genre
+      || (bookId && canReadBookGenre ? await pipeline.getBookGenre(bookId) : undefined);
+    if (targetGenre) {
+      try {
+        const loaded = await readGenreProfile(projectRoot, targetGenre);
+        if (loaded && loaded.profile.id !== "other") {
+          resolvedGenreProfile = loaded;
+        }
+      } catch {
+        // Fallback to unspecialized prompt on missing genre
+      }
+    }
+
     const baseSystemPrompt = buildAgentSystemPrompt(bookId, language, sessionKind, {
       actionSource,
       requestedIntent,
       playWorldExists,
       skills: skillResolution,
       allowIntentSkillSelection,
+      genreProfile: resolvedGenreProfile,
     });
     const intentSkillTool = allowIntentSkillSelection
       ? createUseSkillTool({

@@ -17,28 +17,79 @@ async function tryReadFile(path: string): Promise<string | null> {
 
 /**
  * Load genre profile. Lookup order:
- * 1. Project-level: {projectRoot}/genres/{genreId}.md
- * 2. Built-in:     packages/core/genres/{genreId}.md
- * 3. Fallback:     built-in other.md
+ * 1. Exact id:  {projectRoot}/genres/{genreId}.md
+ * 2. Exact id:  packages/core/genres/{genreId}.md
+ * 3. Display name or in-file id, so a Chinese genre name ("玄幻") resolves to
+ *    the profile whose frontmatter name matches (xuanhuan.md).
+ * 4. Fallback:  built-in other.md
  */
 export async function readGenreProfile(
   projectRoot: string,
   genreId: string,
 ): Promise<ParsedGenreProfile> {
-  const projectPath = join(projectRoot, "genres", `${genreId}.md`);
-  const builtinPath = join(BUILTIN_GENRES_DIR, `${genreId}.md`);
-  const fallbackPath = join(BUILTIN_GENRES_DIR, "other.md");
-
   const raw =
-    (await tryReadFile(projectPath)) ??
-    (await tryReadFile(builtinPath)) ??
-    (await tryReadFile(fallbackPath));
+    (await resolveGenreFile(projectRoot, genreId)) ??
+    (await tryReadFile(join(BUILTIN_GENRES_DIR, "other.md")));
 
   if (!raw) {
     throw new Error(`Genre profile not found for "${genreId}" and fallback "other.md" is missing`);
   }
 
   return parseGenreProfile(raw);
+}
+
+function normalizeGenreToken(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\s_\-/]+/g, "");
+}
+
+/**
+ * Resolve a genre id, display name, or in-file id to the raw profile markdown.
+ * Project-level profiles win over built-in ones.
+ */
+async function resolveGenreFile(projectRoot: string, genreId: string): Promise<string | null> {
+  const projectDir = join(projectRoot, "genres");
+  const direct =
+    (await tryReadFile(join(projectDir, `${genreId}.md`))) ??
+    (await tryReadFile(join(BUILTIN_GENRES_DIR, `${genreId}.md`)));
+  if (direct) return direct;
+
+  const wanted = normalizeGenreToken(genreId);
+  if (!wanted) return null;
+
+  // Match on the human-readable name or the frontmatter id, so books created
+  // with a localized genre ("玄幻", "高武") still get the right rules instead of
+  // silently degrading to other.md.
+  for (const dir of [projectDir, BUILTIN_GENRES_DIR]) {
+    let files: string[];
+    try {
+      files = await readdir(dir);
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      if (!file.endsWith(".md")) continue;
+      const candidateRaw = await tryReadFile(join(dir, file));
+      if (!candidateRaw) continue;
+      let candidate: ParsedGenreProfile;
+      try {
+        candidate = parseGenreProfile(candidateRaw);
+      } catch {
+        continue;
+      }
+      const fileId = file.replace(/\.md$/, "");
+      if (
+        normalizeGenreToken(candidate.profile.name) === wanted
+        || normalizeGenreToken(fileId) === wanted
+        || normalizeGenreToken(candidate.profile.id) === wanted
+      ) {
+        return candidateRaw;
+      }
+    }
+  }
+  return null;
 }
 
 /**

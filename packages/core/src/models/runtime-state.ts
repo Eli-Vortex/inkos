@@ -46,6 +46,31 @@ export const HookRecordSchema = z.object({
   // ledgers; architect-seed and consolidator-rerun both populate it going
   // forward. Reviewer uses it to gate critical severity for stale hooks.
   promoted: z.boolean().optional(),
+  // --- Evidence trail -------------------------------------------------------
+  // Why: a hook that says "paid off" is not verifiable unless it points at the
+  // prose that paid it off. These fields turn the hook ledger from an assertion
+  // into a claim the review view can jump to and the author can dispute.
+  //
+  // All optional so ledgers written before this field existed still parse, and
+  // so inline constructions elsewhere do not have to restate "no evidence yet".
+  // Read it through `hookEvidence()` rather than touching the field directly.
+  // A missing trail means "recorded before evidence tracking", which is
+  // different from "no evidence exists" and is surfaced as such.
+  evidence: z.array(z.object({
+    chapter: z.number().int().min(0),
+    quote: z.string().default(""),
+    kind: z.enum(["planted", "advanced", "paid-off", "contradicted"]),
+  })).optional(),
+  /** Chapter in which the hook reached `resolved`. Absent while still open. */
+  resolvedAt: z.number().int().min(0).optional(),
+  /**
+   * Rule/policy version that produced this record's status.
+   *
+   * Kept so that re-running detection under a newer policy does not silently
+   * rewrite history: a stored verdict can be reported alongside the policy that
+   * judged it instead of being recomputed as if it had always been that way.
+   */
+  policyVersion: z.string().optional(),
 });
 
 export type HookRecord = z.infer<typeof HookRecordSchema>;

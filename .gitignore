@@ -14,6 +14,18 @@ test-project/
 .gstack/
 .worktrees/
 docs/*
+!docs/README.md
+!docs/00-repository-inventory.md
+!docs/01-product-and-brand.md
+!docs/02-feature-catalog.md
+!docs/03-frontend-design.md
+!docs/04-backend-architecture.md
+!docs/05-data-and-transactions.md
+!docs/06-api-contracts.md
+!docs/07-integration-and-skills.md
+!docs/08-deployment-and-operations.md
+!docs/09-implementation-roadmap.md
+!docs/10-testing-and-acceptance.md
 novel-to-comic-research.docx
 .pnpm-store/
 tmp/
@@ -34,3 +46,15 @@ translations/
 inkos.json
 prompt/
 CLAUDE.md
+
+# 本地临时日志、运行时产物与外部测试目录
+*.log
+packages/*/*.log
+packages/*/*.err.log
+test-results/
+*.png
+.agents/
+radar/
+genres/
+other/
+f1159785-b95b-4a75-b122-3e16f72d59b8/

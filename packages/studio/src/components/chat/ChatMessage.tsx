@@ -22,17 +22,19 @@ export const ChatMessage = memo(function ChatMessage({
   const isError = content.startsWith("\u2717");
 
   return (
-    <Message from={role}>
+    <Message from={role} className={isUser ? "mb-5" : "mb-7"}>
       <MessageContent>
         {isUser ? (
-          <div className="text-[17px] leading-[1.72]">{content}</div>
+          <div className="text-[14.5px] leading-relaxed select-text font-normal">{content}</div>
         ) : isError ? (
-          <div className="flex items-center gap-2 text-[17px] leading-[1.72] text-destructive">
-            <XCircle size={14} className="shrink-0" />
+          <div className="flex items-center gap-2.5 text-sm leading-relaxed text-destructive bg-destructive/10 border border-destructive/25 p-3.5 rounded-xl">
+            <XCircle size={15} className="shrink-0" />
             <span>{content.replace(/^\u2717\s*/, "")}</span>
           </div>
         ) : (
-          <MessageResponse>{content}</MessageResponse>
+          <div className="w-full">
+            <MessageResponse>{content}</MessageResponse>
+          </div>
         )}
       </MessageContent>
     </Message>

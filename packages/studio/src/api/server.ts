@@ -24,6 +24,7 @@ import {
   migrateBookSession,
   SessionAlreadyMigratedError,
   abortAgentSession,
+  truncateTranscriptTurns,
   runAgentSession,
   resolveServicePreset,
   resolveServiceProviderFamily,
@@ -131,17 +132,41 @@ import {
   type RequestedIntent,
   type SessionKind,
   type AgentSessionAttachment,
+  type ChapterMeta,
+  readChapterFindings,
+  waiveChapterFinding,
+  readChapterRevision,
+  commitChapter,
+  stableHash,
+  readPlanRevisionState,
+  approvePlan,
+  saveChapterFindings,
+  auditIssuesToFindings,
+  auditIssuesToLegacySummary,
+  findingsToLegacySummary,
+  waiverBasisHash,
+  findChapterFile,
+  deriveBookIdFromTitle,
+  BookStatusSchema,
+  type BookStatus,
+  listBookMaterials,
+  readBookMaterial,
+  deslopProducer,
+  FindingProducerRegistry,
+  isStaleAuditStatus,
+  validateChapterGate,
 } from "@actalk/inkos-core";
 import { isConfirmedProductionAction } from "../shared/confirmed-production.js";
 import { summarizeToolResult } from "../shared/tool-result.js";
-import { access, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { isSafeBookId } from "./safety.js";
+import { isSafeBookId, isSafeSessionId } from "./safety.js";
 import { ApiError } from "./errors.js";
 import { buildStudioBookConfig } from "./book-create.js";
 import {
   deleteStudioTaskSnapshot,
   loadStudioTaskSnapshot,
+  listStudioTaskSessionIds,
   saveStudioTaskSnapshot,
   type StudioTaskSnapshot,
 } from "./task-store.js";
@@ -517,6 +542,12 @@ function resolveProjectTextArtifactFile(root: string, rawPath: string): { readon
 
 function isLikelyFailedToolResult(exec: CollectedToolExec): boolean {
   if (exec.status === "error") return true;
+  // A propose_action result is the confirmation card the author reviews, not a
+  // verdict. Its summary/instruction are free text and can legitimately contain
+  // words like "失败" (e.g. a novel about historical defeats), so scanning it
+  // marked every such card as a failed action and the endpoint returned an error
+  // instead of the card — no card, "确认动作 执行失败".
+  if (exec.tool === "propose_action") return false;
   const text = `${exec.error ?? ""}\n${exec.result ?? ""}`.toLowerCase();
   return /\bfailed\b|\berror\b|失败|异常|出错/.test(text);
 }
@@ -555,6 +586,20 @@ function normalizeStudioSessionKind(value: unknown, fallback: SessionKind): Sess
     throw new ApiError(400, "INVALID_SESSION_KIND", `Invalid sessionKind: ${String(value)}`);
   }
   return parsed.data;
+}
+
+/**
+ * Parse a required positive chapter number from a route param.
+ *
+ * `parseInt("abc")` is `NaN`, and a `NaN` chapter number used to flow into core
+ * mutators (index/brief/snapshot paths). Reject it as a 400 instead.
+ */
+function requireChapterNumber(raw: string | undefined): number {
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new ApiError(400, "INVALID_CHAPTER_NUMBER", `Invalid chapter number: ${String(raw)}`);
+  }
+  return value;
 }
 
 function normalizeStudioActionSource(value: unknown): ActionSource {
@@ -927,10 +972,35 @@ async function importStudioSkillFolder(
 async function loadStudioSkills(root: string) {
   const configured = await loadAvailableAgentSkills({ projectRoot: root });
   const projectSkillIds = await listProjectSkillIds(root);
-  const registry = createSkillRegistry({ skills: configured.skills });
+  // The loader also scans the developer's global `~/.agents/skills`, which for a
+  // coding agent is a large collection of unrelated skills (API clients, design
+  // helpers, OS maintenance). Presenting that as the writing skill library made
+  // the picker 60%+ noise and let a global skill shadow a built-in by id.
+  //
+  // Resolution is untouched, so explicitly requested user skills still work; only
+  // the catalogue offered for writing is scoped. Opt back in with
+  // INKOS_INCLUDE_USER_SKILLS=1.
+  const includeUserSkills = process.env.INKOS_INCLUDE_USER_SKILLS === "1";
+  const excluded = includeUserSkills
+    ? []
+    : configured.skills.filter((skill) => skill.source === "user");
+  const skills = includeUserSkills
+    ? configured.skills
+    : configured.skills.filter((skill) => skill.source !== "user");
+
+  const registry = createSkillRegistry({ skills });
   return {
     skills: registry.listSkills().map((skill) => toStudioSkill(skill, root, projectSkillIds)),
-    diagnostics: configured.diagnostics,
+    diagnostics: [
+      ...configured.diagnostics,
+      ...(excluded.length > 0
+        ? [{
+            path: "~/.agents/skills",
+            // Reported rather than silently dropped, so the exclusion is visible.
+            message: `已排除 ${excluded.length} 个来自全局 ~/.agents/skills 的技能（不属于写作技能库）。设置 INKOS_INCLUDE_USER_SKILLS=1 可包含。`,
+          }]
+        : []),
+    ],
   };
 }
 
@@ -1061,7 +1131,7 @@ type AgentFailureKind = "busy" | "llm" | "internal" | "unknown";
 function classifyAgentFailure(message: string): AgentFailureKind {
   const text = message.trim();
   if (!text) return "unknown";
-  if (/BookWriteLockError|locked by an active InkOS write|BOOK_BUSY/i.test(text)) {
+  if (/BookWriteLockError|locked by an active Novel Creation write|BOOK_BUSY/i.test(text)) {
     return "busy";
   }
   if (
@@ -1091,7 +1161,7 @@ function formatAgentFailure(
   if (kind === "internal") {
     return {
       code: "AGENT_INTERNAL_ERROR",
-      message: pick(lang, `InkOS 内部流程错误：${message}`, `InkOS internal pipeline error: ${message}`),
+      message: pick(lang, `Novel Creation 内部流程错误：${message}`, `Novel Creation internal pipeline error: ${message}`),
       status: 500,
     };
   }
@@ -1615,6 +1685,9 @@ async function executeConfirmedProductionAction(args: {
   }
 }
 
+/** Policy version recorded on findings produced by the review endpoint. */
+const AUDIT_POLICY_VERSION = "audit-endpoint-v1";
+
 interface StudioBookListSummary {
   readonly id: string;
   readonly title: string;
@@ -1678,18 +1751,16 @@ interface ServiceProbeResult {
 
 function broadcast(event: string, data: unknown): void {
   for (const handler of subscribers) {
-    handler(event, data);
+    // A single subscriber must not be able to break the broadcast: these calls
+    // happen *after* a mutation succeeded, and a throwing handler (circular
+    // payload, closed stream) would otherwise turn a completed write into a 500
+    // and starve every subscriber after it.
+    try {
+      handler(event, data);
+    } catch (error) {
+      console.error("[studio] broadcast subscriber failed", error);
+    }
   }
-}
-
-function deriveBookIdFromTitle(title: string): string {
-  return title
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9\u4e00-\u9fff]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 30);
 }
 
 async function completeBookExists(bookDir: string): Promise<boolean> {
@@ -1736,8 +1807,67 @@ async function loadStudioBookListSummary(
   bookId: string,
 ): Promise<StudioBookListSummary> {
   const book = await state.loadBookConfig(bookId);
-  const nextChapter = await state.getNextChapterNumber(bookId);
-  return { ...book, chaptersWritten: nextChapter - 1 };
+  // Read-only progress: skip the markdown-state bootstrap (which parses truth
+  // files and rewrites manifest.json) that a list view does not need.
+  const nextChapter = (await state.getDurableStoryProgress(bookId)) + 1;
+  return {
+    ...book,
+    chaptersWritten: nextChapter - 1,
+    // Real migration signal: the structured runtime state records the warnings
+    // it hit while bootstrapping from markdown. A missing manifest means the
+    // book has never had structured state, which is "unknown", not "complete".
+    migration: await readBookMigrationState(state.bookDir(bookId)),
+  };
+}
+
+/** `complete` / `pending` when the state manifest is readable, `null` when it is not. */
+async function readBookMigrationState(bookDir: string): Promise<"complete" | "pending" | null> {
+  try {
+    const raw = await readFile(join(bookDir, "story", "state", "manifest.json"), "utf-8");
+    const parsed = JSON.parse(raw) as { migrationWarnings?: unknown };
+    const warnings = Array.isArray(parsed.migrationWarnings) ? parsed.migrationWarnings : [];
+    return warnings.length > 0 ? "pending" : "complete";
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Count each book's unfinished tasks.
+ *
+ * Tasks are stored per session, not per book. The task directory is checked
+ * first and the session list is only read when tasks actually exist — the book
+ * list is fetched on every workbench and dashboard mount, so paying a full
+ * session scan there would be a real cost for the common case of no running
+ * tasks.
+ */
+async function countPendingTasksByBook(
+  root: string,
+  taskSessionIds: readonly string[],
+  sessions: ReadonlyArray<{ readonly sessionId: string; readonly bookId: string | null }>,
+): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (taskSessionIds.length === 0) return counts;
+
+  const bookBySession = new Map<string, string>();
+  for (const session of sessions) {
+    if (session.bookId) bookBySession.set(session.sessionId, session.bookId);
+  }
+
+  for (const sessionId of taskSessionIds) {
+    const bookId = bookBySession.get(sessionId);
+    if (!bookId) continue;
+    let status: string | undefined;
+    try {
+      const snapshot = await loadStudioTaskSnapshot(root, sessionId);
+      status = snapshot?.execution.status;
+    } catch {
+      continue;
+    }
+    if (status !== "running" && status !== "processing" && status !== "error") continue;
+    counts.set(bookId, (counts.get(bookId) ?? 0) + 1);
+  }
+  return counts;
 }
 
 function isCustomServiceId(serviceId: string): boolean {
@@ -1930,7 +2060,14 @@ async function resolveBookChapterReviewMode(root: string, bookId: string | undef
 type RevisionGateSetting = "strict" | "lenient" | "always";
 
 function normalizeRevisionGate(gate: unknown): RevisionGateSetting {
-  return gate === "lenient" || gate === "always" ? gate : "strict";
+  if (gate === "lenient" || gate === "always" || gate === "strict") return gate;
+  // Manual revisions are explicitly user-triggered (the author clicked
+  // 润色/重写). Defaulting to "lenient" applies them whenever the audit does not
+  // get worse. The old "strict" default required an improvement, so a polish or
+  // rewrite of an already-clean chapter (0 blocking/critical/AI-tells) was
+  // silently discarded and the button looked broken. Authors who want the old
+  // behaviour can set writing.revisionGate = "strict".
+  return "lenient";
 }
 
 function readProjectRevisionGate(config: Record<string, unknown>): RevisionGateSetting {
@@ -2566,7 +2703,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
   const reservedProductionSessions = new Map<string, string>();
   // 已删除会话的 sessionId：删除会话时中止其生产任务，任务随后的错误持久化
   // 不能把快照文件重新写回来（给已删除的会话"还魂"）。同名会话重新创建时移除标记。
+  // 标记只用于短暂的"删除后收尾"窗口，因此设上限，避免长跑进程无限增长。
   const deletedSessionIds = new Set<string>();
+  const MAX_DELETED_SESSION_MARKS = 500;
+  const markSessionDeleted = (sessionId: string): void => {
+    deletedSessionIds.add(sessionId);
+    while (deletedSessionIds.size > MAX_DELETED_SESSION_MARKS) {
+      const oldest = deletedSessionIds.values().next().value;
+      if (oldest === undefined) break;
+      deletedSessionIds.delete(oldest);
+    }
+  };
 
   // 已删除会话不再追加 transcript 消息：appendManualSessionMessages 底层的
   // appendTranscriptEvents 是 mkdir + appendFile，会把已删除会话的 sessions
@@ -2705,6 +2852,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     },
   };
 
+  // Logger sink that persists to `inkos.log`, which the Logs page reads. Nothing
+  // wrote this file before, so the page was permanently empty.
+  const fileSink: LogSink = {
+    write(entry: LogEntry): void {
+      const line = `${JSON.stringify({ level: entry.level, tag: entry.tag, message: entry.message, timestamp: Date.now() })}\n`;
+      void appendFile(join(root, "inkos.log"), line, "utf-8").catch(() => undefined);
+    },
+  };
+
   async function loadCurrentProjectConfig(
     options?: { readonly requireApiKey?: boolean },
   ): Promise<ProjectConfig> {
@@ -2722,7 +2878,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
   }
 
   async function buildPipelineConfig(
-    overrides?: Partial<Pick<PipelineConfig, "externalContext" | "client" | "model" | "revisionGate">> & {
+    overrides?: Partial<Pick<PipelineConfig, "externalContext" | "client" | "model" | "revisionGate" | "forceApply">> & {
       readonly currentConfig?: ProjectConfig;
       readonly sessionIdForSSE?: string;
       // 确认式生产任务的 execution id。给任务构建 pipeline 时传入，该 pipeline
@@ -2737,7 +2893,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     const projectReviewMode = readProjectChapterReviewMode(currentConfig as unknown as Record<string, unknown>);
     const chapterReviewMode = await resolveBookChapterReviewMode(root, overrides?.bookIdForSettings, projectReviewMode);
     const projectRevisionGate = readProjectRevisionGate(currentConfig as unknown as Record<string, unknown>);
-    const revisionGate = await resolveBookRevisionGate(root, overrides?.bookIdForSettings, projectRevisionGate);
+    // A per-call override (e.g. the UI's "force rewrite") wins over project/book settings.
+    const revisionGate = overrides?.revisionGate
+      ?? await resolveBookRevisionGate(root, overrides?.bookIdForSettings, projectRevisionGate);
     const sseExecutionTag = overrides?.executionIdForSSE
       ? { executionId: overrides.executionIdForSSE }
       : {};
@@ -2754,7 +2912,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
           },
         }
       : sseSink;
-    const logger = createLogger({ tag: "studio", sinks: [scopedSseSink, consoleSink] });
+    const logger = createLogger({ tag: "studio", sinks: [scopedSseSink, consoleSink, fileSink] });
     return {
       client: overrides?.client ?? createLLMClient(currentConfig.llm),
       model: overrides?.model ?? currentConfig.llm.model,
@@ -2764,6 +2922,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       writingReviewRetries: currentConfig.writing?.reviewRetries ?? 1,
       chapterReviewMode,
       revisionGate: overrides?.revisionGate ?? revisionGate,
+      forceApply: overrides?.forceApply,
       modelOverrides: currentConfig.modelOverrides,
       notifyChannels: currentConfig.notify,
       logger,
@@ -2792,7 +2951,31 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.get("/api/v1/books", async (c) => {
     const bookIds = await state.listBooks();
-    const books = await Promise.all(bookIds.map((id) => loadStudioBookListSummary(state, id)));
+    // Isolate per book: one corrupt/missing book.json must not turn the whole
+    // library endpoint into a 500 and hide every other book.
+    const summaries = (
+      await Promise.all(bookIds.map(async (id) => {
+        try {
+          return await loadStudioBookListSummary(state, id);
+        } catch (error) {
+          console.warn(`[studio] skipping unreadable book "${id}"`, error);
+          return null;
+        }
+      }))
+    ).filter((summary): summary is StudioBookListSummary => summary !== null);
+
+    // Only pay for a session scan when there is something to attribute.
+    const taskSessionIds = await listStudioTaskSessionIds(root);
+    let pendingByBook = new Map<string, number>();
+    if (taskSessionIds.length > 0) {
+      const sessions = await listBookSessions(root, null).catch(() => []);
+      pendingByBook = await countPendingTasksByBook(root, taskSessionIds, sessions);
+    }
+
+    const books = summaries.map((summary) => ({
+      ...summary,
+      pendingTaskCount: pendingByBook.get(summary.id) ?? 0,
+    }));
     return c.json({ books });
   });
 
@@ -2801,8 +2984,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     try {
       const book = await state.loadBookConfig(id);
       const chapters = await state.loadChapterIndex(id);
-      const nextChapter = await state.getNextChapterNumber(id);
-      return c.json({ book, chapters, nextChapter });
+      const nextChapter = (await state.getDurableStoryProgress(id)) + 1;
+      return c.json({
+        book,
+        // Derived here, where the rule lives, so the client does not keep its own
+        // copy of "which statuses mean the audit is stale" and drift from it.
+        chapters: chapters.map((chapter) => ({
+          ...chapter,
+          staleAudit: isStaleAuditStatus(chapter.status),
+        })),
+        nextChapter,
+      });
     } catch {
       return c.json({ error: `Book "${id}" not found` }, 404);
     }
@@ -2927,9 +3119,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     const chaptersDir = join(bookDir, "chapters");
 
     try {
-      const files = await readdir(chaptersDir);
-      const paddedNum = String(num).padStart(4, "0");
-      const match = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
+      const match = await findChapterFile(bookDir, num);
       if (!match) return c.json({ error: "Chapter not found" }, 404);
       const content = await readFile(join(chaptersDir, match), "utf-8");
       return c.json({ chapterNumber: num, filename: match, content });
@@ -2946,11 +3136,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     }
     try {
       const bookDir = state.bookDir(id);
-      const [brief, plan, versions, index] = await Promise.all([
+      const [brief, plan, versions, index, revisionInfo] = await Promise.all([
         readChapterUserBrief(bookDir, num),
         readChapterPlanDocument(bookDir, num),
         listChapterVersions(bookDir, num),
         state.loadChapterIndex(id),
+        readChapterRevision(bookDir, num),
       ]);
       const latestChapter = index.reduce((latest, chapter) => Math.max(latest, chapter.number), 0);
       return c.json({
@@ -2958,7 +3149,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         brief,
         plan,
         versions,
+        // The authoritative, monotonic revision. Clients must use this as the
+        // optimistic-lock base, never the (capped) archived-version count.
+        revision: revisionInfo?.revision ?? null,
         canDelete: num === latestChapter,
+        // The chapter's own index entry travels with its working set, so callers
+        // refreshing one chapter do not have to fetch the whole index. The index
+        // is already loaded here for `canDelete`, so this costs nothing.
+        chapter: index.find((chapter) => chapter.number === num) ?? null,
       });
     } catch (e) {
       return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
@@ -2990,9 +3188,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     try {
       const bookDir = state.bookDir(id);
       const chaptersDir = join(bookDir, "chapters");
-      const files = await readdir(chaptersDir);
-      const paddedNum = String(num).padStart(4, "0");
-      const chapterFile = files.find((file) => file.startsWith(paddedNum) && file.endsWith(".md"));
+      const chapterFile = await findChapterFile(bookDir, num);
       if (!chapterFile) {
         return c.json({ error: "Chapter not found" }, 404);
       }
@@ -3101,15 +3297,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
   app.delete("/api/v1/books/:id/chapters/:num", async (c) => {
     const id = c.req.param("id");
     const num = parseInt(c.req.param("num"), 10);
-    const releaseLock = await state.acquireBookLock(id);
+    let releaseLock: (() => Promise<void>) | null = null;
     try {
+      releaseLock = await state.acquireBookLock(id);
       const result = await deleteLatestChapter(state, id, { chapterNumber: num });
       broadcast("chapter:deleted", { bookId: id, chapterNumber: result.deletedChapter });
       return c.json({ ok: true, ...result });
     } catch (e) {
-      return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+      const message = e instanceof Error ? e.message : String(e);
+      return c.json({ error: message }, message.includes("locked by an active") ? 409 : 400);
     } finally {
-      await releaseLock();
+      await releaseLock?.();
     }
   });
 
@@ -3118,25 +3316,78 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
   app.put("/api/v1/books/:id/chapters/:num", async (c) => {
     const id = c.req.param("id");
     const num = parseInt(c.req.param("num"), 10);
-    const { content } = await c.req.json<{ content: string }>();
+    if (!Number.isInteger(num) || num < 1) {
+      return c.json({ error: "INVALID_CHAPTER_NUMBER" }, 400);
+    }
+    // A malformed/truncated autosave body must be rejected, never defaulted to an
+    // empty string: the fallback used to silently replace the whole chapter with
+    // blank text and bump the revision (data loss on an autosave endpoint).
+    let body: { content?: unknown; baseRevision?: unknown };
+    try {
+      body = await c.req.json<{ content?: unknown; baseRevision?: unknown }>();
+    } catch {
+      return c.json({ error: "INVALID_JSON_BODY" }, 400);
+    }
+    if (typeof body.content !== "string") {
+      return c.json({ error: "A content string is required" }, 400);
+    }
 
     const releaseLock = await state.acquireBookLock(id);
     try {
+      const bookDir = state.bookDir(id);
+
+      // Existence first: writing prose into a chapter that is not in the index
+      // would create a file nothing can find.
+      const index = await state.loadChapterIndex(id);
+      if (!index.some((chapter) => chapter.number === num)) {
+        return c.json({ error: "CHAPTER_NOT_FOUND", chapterNumber: num }, 404);
+      }
+
+      // The revision is read *inside* the lock. A client-side pre-check is not
+      // an optimistic lock: two tabs can both observe r3 outside the lock, then
+      // take it in turn and the second silently overwrites the first.
+      const before = await readChapterRevision(bookDir, num);
+      if (!before) {
+        return c.json({ error: "CHAPTER_NOT_FOUND", chapterNumber: num }, 404);
+      }
+      if (typeof body.baseRevision === "number" && body.baseRevision !== before.revision) {
+        return c.json({
+          error: "REVISION_MISMATCH",
+          currentRevision: before.revision,
+          contentHash: before.contentHash,
+        }, 412);
+      }
+
       const result = await executeEditTransaction(
         {
           bookDir: (bookId) => state.bookDir(bookId),
           loadChapterIndex: (bookId) => state.loadChapterIndex(bookId),
-          saveChapterIndex: (bookId, index) => state.saveChapterIndex(bookId, index),
+          saveChapterIndex: (bookId, next) => state.saveChapterIndex(bookId, next),
         },
         {
           kind: "chapter-replace",
           bookId: id,
           chapterNumber: num,
-          fullText: content,
+          fullText: body.content,
           versionSource: "manual",
         },
       );
-      return c.json({ ok: true, chapterNumber: num, result });
+
+      // Report the revision the client now holds, so the next save can use it.
+      const after = await readChapterRevision(bookDir, num);
+
+      // The outline gate is deliberately NOT evaluated here. It belongs before
+      // prose generation (see `write-next`), and running it on every autosave
+      // meant reading the plan and approval files under the book lock on each
+      // save while the verdict was thrown away by the caller.
+      return c.json({
+        ok: true,
+        chapterNumber: num,
+        revision: after?.revision ?? before.revision + 1,
+        contentHash: after?.contentHash ?? "",
+        updatedAt: new Date().toISOString(),
+        result,
+      });
     } catch (e) {
       return c.json({ error: String(e) }, 500);
     } finally {
@@ -3144,8 +3395,154 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     }
   });
 
-  // --- Truth files ---
+  // --- Chapter plan approval ---
 
+  app.get("/api/v1/books/:id/chapters/:num/plan-approval", async (c) => {
+    const id = c.req.param("id");
+    const num = parseInt(c.req.param("num"), 10);
+    if (!Number.isInteger(num) || num < 1) {
+      return c.json({ error: "Invalid chapter number" }, 400);
+    }
+    try {
+      return c.json(await readPlanRevisionState(state.bookDir(id), num));
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    }
+  });
+
+  app.post("/api/v1/books/:id/chapters/:num/plan-approval", async (c) => {
+    const id = c.req.param("id");
+    const num = parseInt(c.req.param("num"), 10);
+    const body = await c.req.json<{ expectedRevision?: number; approvedBy?: string }>()
+      .catch(() => ({} as { expectedRevision?: number; approvedBy?: string }));
+    if (!Number.isInteger(num) || num < 1) {
+      return c.json({ error: "Invalid chapter number" }, 400);
+    }
+    const releaseLock = await state.acquireBookLock(id);
+    try {
+      const result = await approvePlan({
+        bookDir: state.bookDir(id),
+        chapterNumber: num,
+        ...(typeof body.expectedRevision === "number"
+          ? { expectedRevision: body.expectedRevision }
+          : {}),
+        ...(typeof body.approvedBy === "string" && body.approvedBy.trim()
+          ? { approvedBy: body.approvedBy.trim() }
+          : {}),
+      });
+      if (!result.ok) {
+        if (result.reason === "no-plan") {
+          return c.json({ error: "NO_PLAN", message: "本章还没有细纲，无法批准。" }, 404);
+        }
+        return c.json({
+          error: "REVISION_MISMATCH",
+          message: `细纲已是第 ${result.currentRevision} 版，与提交的第 ${body.expectedRevision} 版不一致。`,
+          currentRevision: result.currentRevision,
+        }, 409);
+      }
+      broadcast("chapter:plan-approved", { bookId: id, chapterNumber: num });
+      return c.json({
+        ok: true,
+        chapterNumber: num,
+        approval: result.approval,
+        state: await readPlanRevisionState(state.bookDir(id), num),
+      });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    } finally {
+      await releaseLock();
+    }
+  });
+
+  // --- Chapter findings (structured review state) ---
+  app.get("/api/v1/books/:id/chapters/:num/findings", async (c) => {
+    const id = c.req.param("id");
+    const num = parseInt(c.req.param("num"), 10);
+    if (!Number.isInteger(num) || num < 1) {
+      return c.json({ error: "Invalid chapter number" }, 400);
+    }
+    try {
+      // Read the chapter index only for the legacy fallback summary; the store
+      // itself is a per-chapter file, so this stays cheap.
+      const index = await state.loadChapterIndex(id);
+      const legacyAuditIssues = index.find((chapter) => chapter.number === num)?.auditIssues ?? [];
+      const { findings, source } = await readChapterFindings({
+        bookDir: state.bookDir(id),
+        chapterNumber: num,
+        legacyAuditIssues,
+      });
+      return c.json({ chapterNumber: num, source, findings });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    }
+  });
+
+  app.post("/api/v1/books/:id/chapters/:num/findings/:findingId/waive", async (c) => {
+    const id = c.req.param("id");
+    const num = parseInt(c.req.param("num"), 10);
+    const body: { reason?: unknown; by?: unknown; basisHash?: unknown } =
+      await c.req.json<{ reason?: unknown; by?: unknown; basisHash?: unknown }>().catch(() => ({}));
+    if (!Number.isInteger(num) || num < 1 || typeof body.reason !== "string" || !body.reason.trim()) {
+      return c.json({ error: "A chapter number and a non-empty reason are required" }, 400);
+    }
+    // waiveChapterFinding is a read-modify-write of the findings file; without
+    // the lock two concurrent waives (or a waive racing an audit) drop one side.
+    // acquireBookLock must be inside the try: throwing outside it bypassed the
+    // catch and surfaced as the generic "Unexpected server error" instead of
+    // telling the author the book is busy with another write.
+    let releaseLock: (() => Promise<void>) | null = null;
+    try {
+      releaseLock = await state.acquireBookLock(id);
+      const index = await state.loadChapterIndex(id);
+      const legacyAuditIssues = index.find((chapter) => chapter.number === num)?.auditIssues ?? [];
+      const bookDir = state.bookDir(id);
+
+      // Derive the waiver basis from the finding's own evidence when the client
+      // does not supply one. A waiver without a basis could never be detected as
+      // stale, so it is worth computing here rather than storing an empty string.
+      let basisHash = typeof body.basisHash === "string" ? body.basisHash : "";
+      if (!basisHash) {
+        const { findings } = await readChapterFindings({
+          bookDir,
+          chapterNumber: num,
+          legacyAuditIssues,
+        });
+        const target = findings.find((finding) => finding.id === c.req.param("findingId"));
+        // Same derivation the commit gate re-checks, so a waiver it recorded is
+        // exactly the one it can later detect as stale.
+        basisHash = waiverBasisHash({ evidence: target?.evidence ?? {} });
+      }
+
+      const result = await waiveChapterFinding({
+        bookDir,
+        chapterNumber: num,
+        findingId: c.req.param("findingId"),
+        by: typeof body.by === "string" && body.by.trim() ? body.by.trim() : "author",
+        reason: body.reason.trim(),
+        basisHash,
+        legacyAuditIssues,
+        // Refresh the index summary too, so the workbench/CLI (which read the
+        // index) stop showing the finding as blocking once it is waived.
+        syncIndex: {
+          loadChapterIndex: () => state.loadChapterIndex(id),
+          saveChapterIndex: (next) => state.saveChapterIndex(id, next),
+        },
+      });
+      if (!result.ok) {
+        const status = result.reason === "not-found" ? 404 : 409;
+        return c.json({ error: result.reason ?? "waive-failed", findings: result.findings }, status);
+      }
+      broadcast("chapter:findings", { bookId: id, chapterNumber: num });
+      return c.json({ ok: true, chapterNumber: num, findings: result.findings });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      return c.json({ error: message }, message.includes("locked by an active") ? 409 : 500);
+    } finally {
+      await releaseLock?.();
+    }
+  });
+
+  // --- Truth files ---
   // Flat-file whitelist — the pre-Phase-5 story root files plus dev's legacy
   // editor targets (author_intent / current_focus / volume_outline).
   //
@@ -3288,7 +3685,29 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.post("/api/v1/books/:id/write-next", async (c) => {
     const id = c.req.param("id");
-    const body = await c.req.json<{ wordCount?: number }>().catch(() => ({ wordCount: undefined }));
+    const body = await c.req.json<{ wordCount?: number; skipGate?: boolean }>()
+      .catch(() => ({ wordCount: undefined } as { wordCount?: number; skipGate?: boolean }));
+
+    // The outline gate belongs here, before prose is generated — that is what
+    // "guard outline before prose" means. Manual editing and committing are not
+    // gated, because an author holding their own text must never be blocked.
+    const nextChapter = await state.getNextChapterNumber(id).catch(() => 0);
+    if (nextChapter > 0 && !body.skipGate) {
+      const verdict = await validateChapterGate({
+        bookId: id,
+        bookDir: state.bookDir(id),
+        chapterNumber: nextChapter,
+      });
+      const blocking = verdict.findings.filter((finding) => finding.blocking);
+      if (blocking.length > 0) {
+        return c.json({
+          error: "OUTLINE_GATE_BLOCKED",
+          message: blocking[0]!.message,
+          chapterNumber: nextChapter,
+          findings: blocking,
+        }, 422);
+      }
+    }
 
     broadcast("write:start", { bookId: id });
 
@@ -3377,7 +3796,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.post("/api/v1/books/:id/repair-state/:chapter", async (c) => {
     const id = c.req.param("id");
-    const chapterNum = parseInt(c.req.param("chapter"), 10);
+    const chapterNum = requireChapterNumber(c.req.param("chapter"));
     try {
       const pipeline = new PipelineRunner(await buildPipelineConfig());
       const result = await pipeline.repairChapterState(id, chapterNum);
@@ -3409,16 +3828,69 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
   app.post("/api/v1/books/:id/chapters/:num/approve", async (c) => {
     const id = c.req.param("id");
     const num = parseInt(c.req.param("num"), 10);
+    if (!Number.isInteger(num) || num < 1) {
+      return c.json({ error: "Invalid chapter number" }, 400);
+    }
+    const body = await c.req.json<{
+      baseRevision?: number;
+      idempotencyKey?: string;
+      committedBy?: string;
+    }>().catch(() => ({} as { baseRevision?: number; idempotencyKey?: string; committedBy?: string }));
 
+    const releaseLock = await state.acquireBookLock(id);
     try {
+      const bookDir = state.bookDir(id);
+
+      // Enforce the same verdict the author saw: the stored findings for this
+      // chapter, including anything they explicitly waived.
       const index = await state.loadChapterIndex(id);
-      const updated = index.map((ch) =>
-        ch.number === num ? { ...ch, status: "approved" as const } : ch,
+      const legacyAuditIssues = index.find((chapter) => chapter.number === num)?.auditIssues ?? [];
+      const { findings } = await readChapterFindings({
+        bookDir,
+        chapterNumber: num,
+        legacyAuditIssues,
+      });
+
+      const result = await commitChapter(
+        {
+          bookDir: (bookId) => state.bookDir(bookId),
+          loadChapterIndex: (bookId) => state.loadChapterIndex(bookId),
+          saveChapterIndex: (bookId, next) => state.saveChapterIndex(bookId, next),
+        },
+        {
+          bookId: id,
+          chapterNumber: num,
+          ...(typeof body.baseRevision === "number" ? { baseRevision: body.baseRevision } : {}),
+          ...(typeof body.idempotencyKey === "string" && body.idempotencyKey
+            ? { idempotencyKey: body.idempotencyKey }
+            : {}),
+          ...(typeof body.committedBy === "string" && body.committedBy
+            ? { committedBy: body.committedBy }
+            : {}),
+          findings,
+        },
       );
-      await state.saveChapterIndex(id, updated);
-      return c.json({ ok: true, chapterNumber: num, status: "approved" });
+
+      if (!result.ok) {
+        return c.json({
+          error: result.code,
+          message: result.message,
+          ...(result.currentRevision !== undefined ? { currentRevision: result.currentRevision } : {}),
+          ...(result.findings ? { findings: result.findings } : {}),
+        }, result.status);
+      }
+
+      broadcast("chapter:committed", { bookId: id, chapterNumber: num });
+      return c.json({
+        ok: true,
+        chapterNumber: num,
+        idempotent: result.idempotent,
+        receipt: result.receipt,
+      });
     } catch (e) {
-      return c.json({ error: String(e) }, 500);
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    } finally {
+      await releaseLock();
     }
   });
 
@@ -3426,6 +3898,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     const id = c.req.param("id");
     const num = parseInt(c.req.param("num"), 10);
 
+    // Rollback rewrites the index, snapshots and chapter files. Without the book
+    // lock it races a running writer, which can resurrect the rejected chapter
+    // with its own later index write.
+    const releaseLock = await state.acquireBookLock(id);
     try {
       const index = await state.loadChapterIndex(id);
       const target = index.find((ch) => ch.number === num);
@@ -3444,6 +3920,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       });
     } catch (e) {
       return c.json({ error: String(e) }, 500);
+    } finally {
+      await releaseLock();
     }
   });
 
@@ -3451,29 +3929,55 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.get("/api/v1/events", (c) => {
     return streamSSE(c, async (stream) => {
+      let closed = false;
+      let keepAlive: ReturnType<typeof setInterval> | undefined;
+      let finish!: () => void;
+      const closedPromise = new Promise<void>((resolve) => { finish = resolve; });
+      // A per-session subscriber only needs its own session's events (plus
+      // session-less lifecycle events). Filtering here stops a streamed token in
+      // one session from being serialized and sent to every other open stream.
+      const subscriberSessionId = c.req.query("sessionId") ?? undefined;
+
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        subscribers.delete(handler);
+        if (keepAlive) clearInterval(keepAlive);
+        finish();
+      };
+
+      const write = (event: string, data: string) => {
+        if (closed) return;
+        void stream.writeSSE({ event, data }).catch(cleanup);
+      };
+
       const handler: EventHandler = (event, data) => {
-        stream.writeSSE({ event, data: JSON.stringify(data) });
+        if (subscriberSessionId && data && typeof data === "object" && "sessionId" in data) {
+          const eventSessionId = (data as { sessionId?: unknown }).sessionId;
+          if (typeof eventSessionId === "string" && eventSessionId !== subscriberSessionId) return;
+        }
+        write(event, JSON.stringify(data));
       };
       subscribers.add(handler);
-      await stream.writeSSE({ event: "ping", data: "" });
-      const sessionId = c.req.query("sessionId");
-      if (sessionId) {
-        const task = await loadReconciledTaskSnapshot(sessionId);
-        if (task) await stream.writeSSE({ event: "task:snapshot", data: JSON.stringify(task) });
+      stream.onAbort(cleanup);
+
+      try {
+        await stream.writeSSE({ event: "ping", data: "" });
+        if (subscriberSessionId) {
+          const task = await loadReconciledTaskSnapshot(subscriberSessionId);
+          if (task) await stream.writeSSE({ event: "task:snapshot", data: JSON.stringify(task) });
+        }
+      } catch {
+        cleanup();
+        return;
       }
 
-      // Keep alive
-      const keepAlive = setInterval(() => {
-        stream.writeSSE({ event: "ping", data: "" });
+      if (closed) return;
+      keepAlive = setInterval(() => {
+        write("ping", "");
       }, 30000);
 
-      stream.onAbort(() => {
-        subscribers.delete(handler);
-        clearInterval(keepAlive);
-      });
-
-      // Block until aborted
-      await new Promise(() => {});
+      await closedPromise;
     });
   });
 
@@ -3975,6 +4479,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     const models = mergeServiceModelIds(liveModels.map((model) => model.id), configuredModels)
       .map((id) => liveModels.find((model) => model.id.toLowerCase() === id.toLowerCase()) ?? { id, name: id });
     modelListCache.set(cacheKey, { models, at: Date.now() });
+    // Bound the cache: keys include an API-key fingerprint, so rotating keys
+    // would otherwise accumulate stale entries for the process lifetime.
+    while (modelListCache.size > 50) {
+      const oldestKey = modelListCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      modelListCache.delete(oldestKey);
+    }
     return c.json({ models });
   });
 
@@ -4491,6 +5002,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.get("/api/v1/sessions/:sessionId", async (c) => {
     const sessionId = c.req.param("sessionId");
+    if (!isSafeSessionId(sessionId)) {
+      return c.json({ error: "Invalid session id" }, 400);
+    }
     const session = await loadBookSession(root, sessionId);
     if (!session) return c.json({ error: "Session not found" }, 404);
     const task = await loadReconciledTaskSnapshot(sessionId);
@@ -4498,13 +5012,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
   });
 
   app.post("/api/v1/sessions", async (c) => {
-    const body = await c.req.json<{ bookId?: string | null; sessionId?: string; sessionKind?: string; playMode?: string }>().catch(() => ({}));
+    const body = await c.req.json<{ bookId?: string | null; sessionId?: string; sessionKind?: string; playMode?: string; genre?: string }>().catch(() => ({}));
     const bookId = normalizeApiBookId((body as { bookId?: unknown }).bookId, "bookId");
     const sessionKind = normalizeStudioSessionKind(
       (body as { sessionKind?: unknown }).sessionKind,
       bookId ? "book" : "chat",
     );
     const playMode = normalizeStudioPlayMode((body as { playMode?: unknown }).playMode);
+    const genre = typeof (body as any).genre === "string" && (body as any).genre.trim() ? (body as any).genre.trim() : undefined;
     const sessionId = (body as { sessionId?: string }).sessionId;
     // sessionId 只允许 timestamp-random 格式；防止注入任意文件名
     const safeSessionId = sessionId && /^[0-9]+-[a-z0-9]+$/.test(sessionId) ? sessionId : undefined;
@@ -4515,6 +5030,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       sessionKind,
       ...(playMode ? [{ playMode }] as const : []),
     );
+    if (genre) {
+      (session as any).genre = genre;
+    }
     // 客户端可以用同一个 sessionId 重新创建会话：移除删除标记，
     // 让新会话的生产任务可以正常持久化快照。
     deletedSessionIds.delete(session.sessionId);
@@ -4541,6 +5059,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.put("/api/v1/sessions/:sessionId", async (c) => {
     const sessionId = c.req.param("sessionId");
+    if (!isSafeSessionId(sessionId)) {
+      return c.json({ error: "Invalid session id" }, 400);
+    }
     const body = await c.req.json<{ title?: string }>().catch(() => ({}) as { title?: string });
     const title = body.title?.trim();
     if (!title) {
@@ -4556,20 +5077,29 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.delete("/api/v1/sessions/:sessionId", async (c) => {
     const sessionId = c.req.param("sessionId");
+    if (!isSafeSessionId(sessionId)) {
+      return c.json({ error: "Invalid session id" }, 400);
+    }
     // 先标记删除，再中止任务：任务被中止后的错误持久化会检查这个标记，
     // 不会把已删除会话的快照文件重建出来。
-    deletedSessionIds.add(sessionId);
+    markSessionDeleted(sessionId);
     const controller = await findRunningTaskController(sessionId);
     controller?.abort();
     await Promise.all([
       deleteBookSession(root, sessionId),
       deleteStudioTaskSnapshot(root, sessionId),
+      // Uploaded attachments are scoped by session and never referenced again
+      // once the session is gone; remove them so they cannot accumulate.
+      rm(join(root, ".inkos", "uploads", safeUploadFileName(sessionId)), { recursive: true, force: true }).catch(() => undefined),
     ]);
     return c.json({ ok: true });
   });
 
   app.post("/api/v1/sessions/:sessionId/abort", async (c) => {
     const sessionId = c.req.param("sessionId");
+    if (!isSafeSessionId(sessionId)) {
+      return c.json({ error: "Invalid session id" }, 400);
+    }
     const chatOnly = c.req.query("scope") === "chat";
     const controller = chatOnly ? undefined : await findRunningTaskController(sessionId);
     controller?.abort();
@@ -4577,6 +5107,34 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     const aborted = abortAgentSession(root, sessionId) || taskAborted;
     broadcast("agent:aborted", { sessionId, aborted, scope: chatOnly ? "chat" : "all" });
     return c.json({ ok: true, aborted });
+  });
+
+  // --- Session rewind (chat rollback) ---
+  // Drops the last N request turns so an unsatisfactory reply (and the user ask
+  // that prompted it) can be retried with a different message.
+  app.post("/api/v1/sessions/:sessionId/rewind", async (c) => {
+    const sessionId = c.req.param("sessionId");
+    if (!isSafeSessionId(sessionId)) {
+      return c.json({ error: "Invalid session id" }, 400);
+    }
+    const body = await c.req.json<{ turns?: unknown }>().catch(() => ({} as { turns?: unknown }));
+    const turns = typeof body.turns === "number" && Number.isFinite(body.turns) && body.turns >= 1
+      ? Math.min(50, Math.floor(body.turns))
+      : 1;
+    // Stop any in-flight work before rewriting its transcript.
+    const controller = await findRunningTaskController(sessionId);
+    controller?.abort();
+    abortAgentSession(root, sessionId);
+    try {
+      const droppedTurns = await truncateTranscriptTurns(root, sessionId, turns);
+      await deleteStudioTaskSnapshot(root, sessionId).catch(() => undefined);
+      const session = await loadBookSession(root, sessionId);
+      if (!session) return c.json({ error: "Session not found" }, 404);
+      broadcast("session:rewound", { sessionId, droppedTurns });
+      return c.json({ ok: true, droppedTurns, session });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    }
   });
 
   app.post("/api/v1/agent", async (c) => {
@@ -4593,6 +5151,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       disabledSkills: reqDisabledSkills,
       attachments: reqAttachments,
       playMode: reqPlayMode,
+      genre: reqGenre,
       model: reqModel,
       service: reqService,
     } = await c.req.json<{
@@ -4608,6 +5167,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       disabledSkills?: unknown;
       attachments?: unknown;
       playMode?: string;
+      genre?: string;
       model?: string;
       service?: string;
     }>();
@@ -4617,6 +5177,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     }
     if (!sessionId?.trim()) {
       throw new ApiError(400, "SESSION_ID_REQUIRED", "sessionId is required");
+    }
+    if (!isSafeSessionId(sessionId)) {
+      throw new ApiError(400, "INVALID_SESSION_ID", "sessionId contains illegal path characters");
     }
     const sourceRequestId = typeof reqClientRequestId === "string" && reqClientRequestId.trim()
       ? reqClientRequestId.trim().slice(0, 128)
@@ -4710,9 +5273,18 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       let resolvedApiKey: string | undefined;
 
       if (reqService && reqModel) {
-        // 1. Frontend explicitly selected a service+model — fail loudly if no key
-        try {
-          const configuredEntry = await resolveConfiguredServiceEntry(root, reqService);
+        // 1. Frontend explicitly selected a service+model — fail loudly if no key.
+        //    But if the remembered selection is no longer part of the service's
+        //    configured model list (e.g. a removed or reasoning-only model), ignore
+        //    it and fall through to the configured default instead of sending every
+        //    call to a model that cannot produce a final answer.
+        const configuredEntry = await resolveConfiguredServiceEntry(root, reqService);
+        const configuredModels = configuredEntry?.models ?? [];
+        const requestedIsConfigured = configuredModels.length === 0
+          || configuredModels.some((model) => model.toLowerCase() === reqModel.toLowerCase());
+        if (!requestedIsConfigured) {
+          console.warn(`[studio] ignoring unconfigured selected model "${reqModel}" for ${reqService}`);
+        } else try {
           const resolved = await resolveServiceModel(
             reqService,
             reqModel,
@@ -5028,6 +5600,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
             : {}),
           projectRoot: root,
           bookId: agentBookId,
+          genre: reqGenre || (bookSession as any).genre,
           sessionKind,
           playMode,
           actionSource,
@@ -5320,19 +5893,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.post("/api/v1/books/:id/audit/:chapter", async (c) => {
     const id = c.req.param("id");
-    const chapterNum = parseInt(c.req.param("chapter"), 10);
+    const chapterNum = requireChapterNumber(c.req.param("chapter"));
     const bookDir = state.bookDir(id);
 
     broadcast("audit:start", { bookId: id, chapter: chapterNum });
     try {
       const book = await state.loadBookConfig(id);
       const chaptersDir = join(bookDir, "chapters");
-      const files = await readdir(chaptersDir);
-      const paddedNum = String(chapterNum).padStart(4, "0");
-      const match = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
+      const match = await findChapterFile(bookDir, chapterNum);
       if (!match) return c.json({ error: "Chapter not found" }, 404);
 
       const content = await readFile(join(chaptersDir, match), "utf-8");
+      // Remember which revision was audited. The auditor takes seconds to tens of
+      // seconds, and the author can save during that window — the verdict must not
+      // then be recorded as if it applied to the newer prose, or the commit gate
+      // would accept text that was never reviewed.
+      const auditedRevision = await readChapterRevision(bookDir, chapterNum);
       const currentConfig = await loadCurrentProjectConfig();
       const { ContinuityAuditor } = await import("@actalk/inkos-core");
       const auditor = new ContinuityAuditor({
@@ -5342,8 +5918,83 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         bookId: id,
       });
       const result = await auditor.auditChapter(bookDir, content, chapterNum, book.genre);
-      broadcast("audit:complete", { bookId: id, chapter: chapterNum, passed: result.passed });
-      return c.json(result);
+
+      // The audit verdict has to be persisted, not just returned. Without this
+      // the chapter stayed `audit-failed` forever after any manual edit, so the
+      // commit gate refused it permanently and "re-audit" could never clear it —
+      // a real dead end for the author.
+      if (result.parseFailed) {
+        // An unparsable response is not a verdict. Leave the stored state alone
+        // and say so, rather than recording a pass that was never given.
+        broadcast("audit:complete", { bookId: id, chapter: chapterNum, passed: false, persisted: false });
+        return c.json({ ...result, persisted: false });
+      }
+
+      const releaseLock = await state.acquireBookLock(id);
+      try {
+        // Re-check under the lock: if the prose changed while the auditor was
+        // running, its verdict describes text that is no longer there.
+        const currentRevision = await readChapterRevision(bookDir, chapterNum);
+        if (
+          auditedRevision &&
+          currentRevision &&
+          currentRevision.contentHash !== auditedRevision.contentHash
+        ) {
+          broadcast("audit:complete", { bookId: id, chapter: chapterNum, passed: false, persisted: false });
+          return c.json({
+            ...result,
+            persisted: false,
+            stale: true,
+            message: "审核期间正文已被修改，本次审核结论已作废，请重新审核。",
+          });
+        }
+
+        // Both review sources run through the registry, so the "one producer per
+        // source" rule is actually exercised rather than merely available. The
+        // continuity producer wraps the verdict that was just computed; the
+        // deslop producer is the in-process pattern scanner, which until now was
+        // exported but never invoked by anything.
+        const registry = new FindingProducerRegistry();
+        registry.register({
+          source: "continuity",
+          async produce() {
+            return auditIssuesToFindings(result.issues, { chapterNumber: chapterNum });
+          },
+        });
+        registry.register(deslopProducer(async () => content));
+        const findings = await registry.collect({
+          bookId: id,
+          chapterNumber: chapterNum,
+          policyVersion: AUDIT_POLICY_VERSION,
+        });
+
+        await saveChapterFindings({
+          bookDir,
+          chapterNumber: chapterNum,
+          findings,
+        });
+
+        const index = await state.loadChapterIndex(id);
+        const auditedAt = new Date().toISOString();
+        const updated: ChapterMeta[] = index.map((chapter) => (
+          chapter.number === chapterNum
+            ? {
+                ...chapter,
+                // The status follows the continuity verdict only: deslop rules are
+                // advisory by policy and must not decide pass/fail.
+                status: result.passed ? "ready-for-review" : "audit-failed",
+                updatedAt: auditedAt,
+                auditIssues: [...findingsToLegacySummary(findings)],
+              }
+            : chapter
+        ));
+        await state.saveChapterIndex(id, updated);
+      } finally {
+        await releaseLock();
+      }
+
+      broadcast("audit:complete", { bookId: id, chapter: chapterNum, passed: result.passed, persisted: true });
+      return c.json({ ...result, persisted: true });
     } catch (e) {
       broadcast("audit:error", { bookId: id, error: String(e) });
       return c.json({ error: String(e) }, 500);
@@ -5354,24 +6005,25 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.post("/api/v1/books/:id/revise/:chapter", async (c) => {
     const id = c.req.param("id");
-    const chapterNum = parseInt(c.req.param("chapter"), 10);
+    const chapterNum = requireChapterNumber(c.req.param("chapter"));
     const bookDir = state.bookDir(id);
     const body = await c.req
-      .json<{ mode?: string; brief?: string }>()
-      .catch(() => ({ mode: "spot-fix", brief: undefined }));
+      .json<{ mode?: string; brief?: string; force?: boolean }>()
+      .catch(() => ({ mode: "spot-fix", brief: undefined, force: undefined }));
 
     broadcast("revise:start", { bookId: id, chapter: chapterNum });
     try {
       const book = await state.loadBookConfig(id);
       const chaptersDir = join(bookDir, "chapters");
-      const files = await readdir(chaptersDir);
-      const paddedNum = String(chapterNum).padStart(4, "0");
-      const match = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
+      const match = await findChapterFile(bookDir, chapterNum);
       if (!match) return c.json({ error: "Chapter not found" }, 404);
 
       const pipeline = new PipelineRunner(await buildPipelineConfig({
         externalContext: body.brief,
         bookIdForSettings: id,
+        // "force" (UI: 直接覆盖) skips both safety gates that keep the original
+        // chapter: the audit gate (revisionGate) and the state-settlement gate.
+        ...(body.force ? { revisionGate: "always" as const, forceApply: true } : {}),
       }));
       const normalizedMode = body.mode ?? "spot-fix";
       const result = await pipeline.reviseDraft(
@@ -5392,6 +6044,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
   app.get("/api/v1/books/:id/export", async (c) => {
     const id = c.req.param("id");
     const format = (c.req.query("format") ?? "txt") as string;
+    if (format !== "txt" && format !== "md" && format !== "epub") {
+      return c.json({ error: "INVALID_EXPORT_FORMAT" }, 400);
+    }
     const approvedOnly = c.req.query("approvedOnly") === "true";
 
     try {
@@ -5419,6 +6074,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     const id = c.req.param("id");
     const { format, approvedOnly } = await c.req.json<{ format?: string; approvedOnly?: boolean }>().catch(() => ({ format: "txt", approvedOnly: false }));
     const fmt = format ?? "txt";
+    // The format is interpolated into the output filename; an unvalidated value
+    // like "../../etc/passwd" escapes the book directory and writes anywhere.
+    if (fmt !== "txt" && fmt !== "md" && fmt !== "epub") {
+      return c.json({ error: "INVALID_EXPORT_FORMAT" }, 400);
+    }
 
     try {
       const pipeline = new PipelineRunner(await buildPipelineConfig());
@@ -5642,14 +6302,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.post("/api/v1/books/:id/detect/:chapter", async (c) => {
     const id = c.req.param("id");
-    const chapterNum = parseInt(c.req.param("chapter"), 10);
+    const chapterNum = requireChapterNumber(c.req.param("chapter"));
     const bookDir = state.bookDir(id);
 
     try {
       const chaptersDir = join(bookDir, "chapters");
-      const files = await readdir(chaptersDir);
-      const paddedNum = String(chapterNum).padStart(4, "0");
-      const match = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
+      const match = await findChapterFile(bookDir, chapterNum);
       if (!match) return c.json({ error: "Chapter not found" }, 404);
 
       const content = await readFile(join(chaptersDir, match), "utf-8");
@@ -5686,12 +6344,62 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     if (RUNTIME_DIAGNOSTIC_FILE_RE.test(file)) {
       return c.json({ error: "Runtime diagnostic files are read-only" }, 400);
     }
-    const { content } = await c.req.json<{ content: string }>();
-    const { writeFile: writeFileFs, mkdir: mkdirFs } = await import("node:fs/promises");
-    const { dirname: dirnameFs } = await import("node:path");
-    await mkdirFs(dirnameFs(resolved), { recursive: true });
-    await writeFileFs(resolved, content, "utf-8");
+    let body: { content?: unknown };
+    try {
+      body = await c.req.json<{ content?: unknown }>();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    if (typeof body.content !== "string") {
+      return c.json({ error: "A content string is required" }, 400);
+    }
+    // Take the book lock so a truth-file edit cannot interleave with a running
+    // writer that is mutating the same story/ files.
+    const releaseLock = await state.acquireBookLock(id);
+    try {
+      const { writeFile: writeFileFs, mkdir: mkdirFs } = await import("node:fs/promises");
+      const { dirname: dirnameFs } = await import("node:path");
+      await mkdirFs(dirnameFs(resolved), { recursive: true });
+      await writeFileFs(resolved, body.content, "utf-8");
+    } finally {
+      await releaseLock();
+    }
     return c.json({ ok: true });
+  });
+
+  // --- Book materials (the model's per-book research library) ---
+
+  app.get("/api/v1/books/:id/materials", async (c) => {
+    const id = c.req.param("id");
+    try {
+      const facets = await listBookMaterials(state.bookDir(id));
+      return c.json({ facets });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    }
+  });
+
+  app.get("/api/v1/books/:id/materials/:facet/:name", async (c) => {
+    const id = c.req.param("id");
+    try {
+      const content = await readBookMaterial(state.bookDir(id), c.req.param("facet"), c.req.param("name"));
+      if (content === null) return c.json({ error: "Material not found" }, 404);
+      return c.json({ facet: c.req.param("facet"), name: c.req.param("name"), content });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    }
+  });
+
+  // Force-release a stuck book write lock. A hung write task holds the
+  // in-process lock forever and blocks every later edit with BookWriteLockError.
+  app.post("/api/v1/books/:id/unlock", async (c) => {
+    const id = c.req.param("id");
+    try {
+      await state.forceReleaseBookLock(id);
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    }
   });
 
   // =============================================
@@ -5703,6 +6411,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
   app.delete("/api/v1/books/:id", async (c) => {
     const id = c.req.param("id");
     const bookDir = state.bookDir(id);
+    // `force: true` used to report success for a book that never existed.
+    const exists = await access(join(bookDir, "book.json")).then(() => true).catch(() => false);
+    if (!exists) {
+      return c.json({ error: `Book "${id}" not found` }, 404);
+    }
+    // Hold the book lock so an in-flight writer cannot recreate files mid-delete.
+    const releaseLock = await state.acquireBookLock(id);
     try {
       const { rm } = await import("node:fs/promises");
       await rm(bookDir, { recursive: true, force: true });
@@ -5710,6 +6425,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       return c.json({ ok: true, bookId: id });
     } catch (e) {
       return c.json({ error: String(e) }, 500);
+    } finally {
+      await releaseLock();
     }
   });
 
@@ -5717,26 +6434,51 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.put("/api/v1/books/:id", async (c) => {
     const id = c.req.param("id");
-    const updates = await c.req.json<{
+    let updates: { chapterWordCount?: unknown; targetChapters?: unknown; status?: unknown; language?: unknown };
+    try {
+      updates = await c.req.json<typeof updates>();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    // Validate before persisting: the route used to write `Number("abc")` (NaN →
+    // null) and any string as `status`, corrupting book.json for readers.
+    const patch: {
       chapterWordCount?: number;
       targetChapters?: number;
-      status?: string;
-      language?: string;
-    }>();
+      status?: BookStatus;
+      language?: "zh" | "en";
+    } = {};
+    for (const field of ["chapterWordCount", "targetChapters"] as const) {
+      if (updates[field] === undefined) continue;
+      const value = Number(updates[field]);
+      if (!Number.isInteger(value) || value < 1) {
+        return c.json({ error: `${field} must be a positive integer` }, 400);
+      }
+      patch[field] = value;
+    }
+    if (updates.status !== undefined) {
+      const parsed = BookStatusSchema.safeParse(updates.status);
+      if (!parsed.success) return c.json({ error: "Invalid status" }, 400);
+      patch.status = parsed.data;
+    }
+    if (updates.language !== undefined) {
+      if (updates.language !== "zh" && updates.language !== "en") {
+        return c.json({ error: "language must be zh or en" }, 400);
+      }
+      patch.language = updates.language;
+    }
+
+    const releaseLock = await state.acquireBookLock(id);
     try {
       const book = await state.loadBookConfig(id);
-      const updated = {
-        ...book,
-        ...(updates.chapterWordCount !== undefined ? { chapterWordCount: Number(updates.chapterWordCount) } : {}),
-        ...(updates.targetChapters !== undefined ? { targetChapters: Number(updates.targetChapters) } : {}),
-        ...(updates.status !== undefined ? { status: updates.status as typeof book.status } : {}),
-        ...(updates.language !== undefined ? { language: updates.language as "zh" | "en" } : {}),
-        updatedAt: new Date().toISOString(),
-      };
+      const updated = { ...book, ...patch, updatedAt: new Date().toISOString() };
       await state.saveBookConfig(id, updated);
       return c.json({ ok: true, book: updated });
     } catch (e) {
       return c.json({ error: String(e) }, 500);
+    } finally {
+      await releaseLock();
     }
   });
 
@@ -5744,7 +6486,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.post("/api/v1/books/:id/rewrite/:chapter", async (c) => {
     const id = c.req.param("id");
-    const chapterNum = parseInt(c.req.param("chapter"), 10);
+    const chapterNum = requireChapterNumber(c.req.param("chapter"));
     const body: { brief?: string } = await c.req
       .json<{ brief?: string }>()
       .catch(() => ({}));
@@ -5775,7 +6517,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.post("/api/v1/books/:id/resync/:chapter", async (c) => {
     const id = c.req.param("id");
-    const chapterNum = parseInt(c.req.param("chapter"), 10);
+    const chapterNum = requireChapterNumber(c.req.param("chapter"));
     const body: { brief?: string } = await c.req
       .json<{ brief?: string }>()
       .catch(() => ({}));
@@ -6450,6 +7192,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       return c.json({ error: { code: "INVALID_ID", message: `invalid translation id: ${id}` } }, 400);
     }
     const body: { format?: "txt" | "md" | "epub"; outputPath?: string } = await c.req.json().catch(() => ({}));
+    // outputPath is written verbatim (mkdir + writeFile); keep it inside the
+    // project so a crafted path cannot write to an arbitrary location.
+    if (body.outputPath !== undefined) {
+      const rel = relative(resolve(root), resolve(body.outputPath));
+      if (rel.startsWith("..") || isAbsolute(rel)) {
+        return c.json({ error: { code: "INVALID_OUTPUT_PATH", message: "outputPath must stay inside the project" } }, 400);
+      }
+    }
     const result = await writeTranslationExport(root, id, {
       format: body.format ?? "md",
       outputPath: body.outputPath,
@@ -6648,6 +7398,18 @@ export async function startStudioServer(
     }
   }
 
-  console.log(`InkOS Studio running on http://localhost:${port}`);
-  serve({ fetch: app.fetch, port });
+  // Bind loopback by default. With no hostname, `serve` listens on every
+  // interface, which exposes the unauthenticated API (including the service
+  // secret endpoints) to the whole LAN. Override with INKOS_STUDIO_HOST.
+  const hostname = process.env.INKOS_STUDIO_HOST ?? "127.0.0.1";
+  console.log(`Novel Creation Studio running on http://${hostname}:${port}`);
+  serve({ fetch: app.fetch, port, hostname });
 }
+
+
+
+
+
+
+
+

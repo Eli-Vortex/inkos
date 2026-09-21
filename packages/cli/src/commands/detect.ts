@@ -2,12 +2,13 @@ import { Command } from "commander";
 import {
   StateManager,
   detectChapter,
+  findChapterFile,
   loadDetectionHistory,
   analyzeDetectionInsights,
   type DetectionConfig,
 } from "@actalk/inkos-core";
 import { loadConfig, findProjectRoot, resolveBookId, log, logError } from "../utils.js";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export const detectCommand = new Command("detect")
@@ -103,9 +104,7 @@ function printResult(
 
 async function readChapterContent(bookDir: string, chapterNumber: number): Promise<string> {
   const chaptersDir = join(bookDir, "chapters");
-  const files = await readdir(chaptersDir);
-  const paddedNum = String(chapterNumber).padStart(4, "0");
-  const chapterFile = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
+  const chapterFile = await findChapterFile(bookDir, chapterNumber);
   if (!chapterFile) {
     throw new Error(`Chapter ${chapterNumber} file not found`);
   }

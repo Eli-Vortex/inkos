@@ -290,7 +290,7 @@ describe("chatCompletion via pi-ai", () => {
     await chatCompletion(client, "test-model", [{ role: "user", content: "hi" }]);
 
     const opts = mockStreamSimple.mock.calls[0]?.[2] as { headers?: Record<string, string> };
-    expect(opts.headers).toMatchObject({ "User-Agent": "InkOS/1.3.5", "X-Valid": "ok" });
+    expect(opts.headers).toMatchObject({ "User-Agent": "Novel Creation/1.3.5", "X-Valid": "ok" });
     expect(opts.headers).not.toHaveProperty("X-Bad");
   });
 
@@ -1212,8 +1212,8 @@ describe("stream interruption detection", () => {
 
     await expect(chatCompletion(nativeStreamClient(), "glm-compat", [{ role: "user", content: "写第1章" }]))
       .rejects.toThrow(/Stream interrupted|completion signal/);
-    // 初次 + TRANSIENT_LLM_RETRIES(2) 次重试
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // 初次 + TRANSIENT_LLM_RETRIES(3) 次重试
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     vi.unstubAllGlobals();
   });
 
@@ -1243,7 +1243,32 @@ describe("stream interruption detection", () => {
 
     await expect(chatCompletion(nativeStreamClient(), "glm-compat", [{ role: "user", content: "写正文" }]))
       .rejects.toThrow(/output limit|length|Stream interrupted/i);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // 初次 + MAX_OUTPUT_CONTINUATIONS(4) 次继续；每次都被同一段截断流拒绝。
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    vi.unstubAllGlobals();
+  });
+
+  it("continues the generation after an output-limit cut and stitches the parts", async () => {
+    const lengthSse = [
+      "data: {\"choices\":[{\"delta\":{\"content\":\"写到上限的正文\"}}]}\n\n",
+      "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(sseResponse(lengthSse))
+      .mockResolvedValueOnce(sseResponse(COMPLETE_SSE));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await chatCompletion(nativeStreamClient(), "glm-compat", [{ role: "user", content: "生成 700 章基础设定" }]);
+
+    // 截断部分 + 续写部分被拼接为完整内容，而不是抛错或只留半截。
+    expect(result.content).toBe("写到上限的正文完整的正文内容");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // 第二次请求带上已生成的半截内容与继续指令。
+    const secondBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+    const secondMessages = secondBody.messages as Array<{ role: string; content: string }>;
+    expect(secondMessages.some((m) => m.role === "assistant" && m.content.includes("写到上限的正文"))).toBe(true);
+    expect(secondMessages.some((m) => m.role === "user" && m.content.includes("继续"))).toBe(true);
     vi.unstubAllGlobals();
   });
 
@@ -1299,6 +1324,7 @@ describe("stream interruption detection", () => {
 
     await expect(chatCompletion(makeClient(), "test-model", [{ role: "user", content: "写" }]))
       .rejects.toThrow(/output limit|length|Stream interrupted/i);
-    expect(mockStreamSimple).toHaveBeenCalledTimes(3);
+    // 初次 + MAX_OUTPUT_CONTINUATIONS(4) 次继续。
+    expect(mockStreamSimple).toHaveBeenCalledTimes(5);
   });
 });

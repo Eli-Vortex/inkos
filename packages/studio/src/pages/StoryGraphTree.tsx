@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useApi, fetchJson, buildApiUrl } from "../hooks/use-api";
 import { useColors } from "../hooks/use-colors";
+import { ErrorState, LoadingState } from "../components/ui/states";
 import { tr } from "../lib/app-language";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
@@ -37,8 +38,8 @@ export function StoryGraphTree({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [generatingId, setGeneratingId] = useState<string | null>(null);
 
-  if (loading) return <div className={c.muted}>{t("common.loading")}</div>;
-  if (error) return <div className="text-destructive">{t("common.error")}: {error}</div>;
+  if (loading) return <LoadingState label={t("common.loading")} />;
+  if (error) return <ErrorState title={t("common.error")} message={error} onRetry={() => void refetch()} />;
   if (!graph) return null;
   const exportUrl = buildProjectExportDownloadUrl(projectId);
 

@@ -256,7 +256,7 @@ export function attachSessionStreamListeners({
   streamEs,
   set,
   get,
-}: AttachSessionStreamListenersInput): void {
+}: AttachSessionStreamListenersInput): { flush: () => void } {
   const textDeltaBatcher = createStreamTextDeltaBatcher((deltas) => {
     set((state) => ({
       sessions: updateSession(state.sessions, sessionId, (runtime) => {
@@ -639,6 +639,16 @@ export function attachSessionStreamListeners({
       // ignore
     }
   });
+
+  // The /agent HTTP response can arrive before the 48ms delta batch flushes. The
+  // caller must flush before deciding whether a streamed assistant message
+  // exists, or the late batch appends a second bubble / duplicates the tail.
+  return {
+    flush: () => {
+      flushTextDeltas();
+      flushProgressThrottles();
+    },
+  };
 }
 
 function compressionLabel(category: ContextCompressionCategory): string {
