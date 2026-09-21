@@ -28,7 +28,10 @@ import {
   Trash2,
   Save,
   Hand,
-  Settings2
+  Settings2,
+  CheckCircle2,
+  AlertCircle,
+  Info
 } from "lucide-react";
 
 interface ChapterMeta {
@@ -213,8 +216,27 @@ export function BookDetail({
     resolve?.(ok);
   };
 
-  const [notice, setNotice] = useState<{ title: string; message: string } | null>(null);
-  const notify = (message: string, title = "提示") => setNotice({ title, message });
+  const [toast, setToast] = useState<{ id: number; title: string; message: string; tone: "ok" | "error" | "info" } | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const notify = (message: string, title = "提示", tone: "ok" | "error" | "info" = "info") => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    const id = Date.now();
+    const resolvedTone =
+      tone !== "info"
+        ? tone
+        : (title.includes("成功") || title.includes("完成") ? "ok" : title.includes("失败") ? "error" : "info");
+    setToast({ id, title, message, tone: resolvedTone });
+    toastTimerRef.current = setTimeout(() => {
+      setToast((cur) => (cur?.id === id ? null : cur));
+    }, 3200);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    };
+  }, []);
 
   const activity = useMemo(() => deriveBookActivity(sse.messages, bookId), [bookId, sse.messages]);
   const writing = writeRequestPending || activity.writing;
@@ -1077,16 +1099,41 @@ export function BookDetail({
         onConfirm={() => closeAsk(true)}
         onCancel={() => closeAsk(false)}
       />
-      <ConfirmDialog
-        open={notice !== null}
-        title={notice?.title ?? ""}
-        message={notice?.message ?? ""}
-        confirmLabel={t("common.confirm")}
-        cancelLabel={t("common.cancel")}
-        hideCancel
-        onConfirm={() => setNotice(null)}
-        onCancel={() => setNotice(null)}
-      />
+      {toast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`fixed bottom-6 right-6 z-50 flex items-start gap-3 rounded-xl border p-4 shadow-xl backdrop-blur-md max-w-sm transition-all duration-200 animate-in fade-in slide-in-from-bottom-2 ${
+            toast.tone === "ok"
+              ? "border-emerald-500/40 bg-card/95 text-foreground dark:bg-card/90"
+              : toast.tone === "error"
+              ? "border-destructive/40 bg-destructive/15 text-destructive"
+              : "border-border/60 bg-card/95 text-foreground"
+          }`}
+        >
+          <div className="mt-0.5 shrink-0">
+            {toast.tone === "ok" ? (
+              <CheckCircle2 size={16} className="text-emerald-500" />
+            ) : toast.tone === "error" ? (
+              <AlertCircle size={16} />
+            ) : (
+              <Info size={16} className="text-primary" />
+            )}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="text-xs font-semibold leading-none">{toast.title}</div>
+            <div className="mt-1 text-xs opacity-90 break-words leading-relaxed whitespace-pre-line">{toast.message}</div>
+          </div>
+          <button
+            type="button"
+            aria-label="关闭提示"
+            onClick={() => setToast(null)}
+            className="shrink-0 text-muted-foreground hover:text-foreground p-0.5 transition-colors"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

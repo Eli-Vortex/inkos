@@ -29,7 +29,7 @@
     "dev:studio": "node scripts/dev.mjs",
     "dev:studio:stop": "node scripts/dev-stop.mjs",
     "test": "pnpm -r test",
-    "lint": "pnpm -r lint",
+    "lint": "pnpm -r typecheck && node scripts/audit-semantic-patterns.mjs",
     "typecheck": "pnpm -r typecheck",
     "audit:semantic-patterns": "node scripts/audit-semantic-patterns.mjs",
     "verify:publish-manifests": "node scripts/verify-no-workspace-protocol.mjs packages/core packages/cli packages/studio",

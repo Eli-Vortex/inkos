@@ -3112,9 +3112,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   // --- Chapters ---
 
+  function parseChapterNum(raw: string | undefined): number | null {
+    if (!raw) return null;
+    const num = parseInt(raw, 10);
+    return Number.isInteger(num) && num >= 1 ? num : null;
+  }
+
   app.get("/api/v1/books/:id/chapters/:num", async (c) => {
     const id = c.req.param("id");
-    const num = parseInt(c.req.param("num"), 10);
+    const num = parseChapterNum(c.req.param("num"));
+    if (num === null) return c.json({ error: "Invalid chapter number" }, 400);
     const bookDir = state.bookDir(id);
     const chaptersDir = join(bookDir, "chapters");
 
@@ -3130,8 +3137,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.get("/api/v1/books/:id/chapters/:num/workspace", async (c) => {
     const id = c.req.param("id");
-    const num = parseInt(c.req.param("num"), 10);
-    if (!Number.isInteger(num) || num < 1) {
+    const num = parseChapterNum(c.req.param("num"));
+    if (num === null) {
       return c.json({ error: "Invalid chapter number" }, 400);
     }
     try {
@@ -3248,7 +3255,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.get("/api/v1/books/:id/chapters/:num/versions/:versionId", async (c) => {
     const id = c.req.param("id");
-    const num = parseInt(c.req.param("num"), 10);
+    const num = parseChapterNum(c.req.param("num"));
+    if (num === null) return c.json({ error: "Invalid chapter number" }, 400);
     try {
       const content = await readChapterVersion(
         state.bookDir(id),
@@ -3263,7 +3271,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.post("/api/v1/books/:id/chapters/:num/versions/:versionId/restore", async (c) => {
     const id = c.req.param("id");
-    const num = parseInt(c.req.param("num"), 10);
+    const num = parseChapterNum(c.req.param("num"));
+    if (num === null) return c.json({ error: "Invalid chapter number" }, 400);
     const releaseLock = await state.acquireBookLock(id);
     try {
       const fullText = await readChapterVersion(
@@ -3296,7 +3305,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.delete("/api/v1/books/:id/chapters/:num", async (c) => {
     const id = c.req.param("id");
-    const num = parseInt(c.req.param("num"), 10);
+    const num = parseChapterNum(c.req.param("num"));
+    if (num === null) return c.json({ error: "Invalid chapter number" }, 400);
     let releaseLock: (() => Promise<void>) | null = null;
     try {
       releaseLock = await state.acquireBookLock(id);

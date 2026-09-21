@@ -25,6 +25,7 @@ import { StoryPlayer } from "./pages/StoryPlayer";
 import { StoryGraphTree } from "./pages/StoryGraphTree";
 const FlowView = lazy(() => import("./pages/FlowView"));
 const FilmWizard = lazy(() => import("./pages/FilmWizard"));
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { LanguageSelector } from "./pages/LanguageSelector";
 import { WorkbenchApp } from "./workbench";
 import { useWorkbench as useWorkbenchStore } from "./workbench/state/store";
@@ -348,6 +349,7 @@ export function App() {
 
         {/* Main Content Area */}
         <main className="flex-1 relative overflow-y-auto scroll-smooth">
+          <ErrorBoundary key={route.page}>
           {route.page === "dashboard" && (
             <div className="max-w-4xl mx-auto px-6 py-12 md:px-12 lg:py-16 fade-in">
               <Dashboard nav={nav} sse={sse} theme={theme} t={t} />
@@ -517,6 +519,7 @@ export function App() {
               <FlowView projectId={route.projectId} nav={nav} theme={theme} t={t} />
             </Suspense>
           )}
+          </ErrorBoundary>
         </main>
       </div>
     </div>
